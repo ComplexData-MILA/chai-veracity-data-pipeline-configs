@@ -6,4 +6,5 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28.1",
+    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0"
 ]
