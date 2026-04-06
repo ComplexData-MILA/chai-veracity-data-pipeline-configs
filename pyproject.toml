@@ -8,5 +8,6 @@ dependencies = [
     "backoff>=2.2.1",
     "httpx>=0.28.1",
     "openai>=2.30.0",
+    "pyyaml>=6.0.3",
     "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0",
 ]

@@ -18,6 +18,7 @@ dependencies = [
     { name = "backoff" },
     { name = "httpx" },
     { name = "openai" },
+    { name = "pyyaml" },
     { name = "s3-data-tool" },
 ]
 
@@ -26,6 +27,7 @@ requires-dist = [
     { name = "backoff", specifier = ">=2.2.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "openai", specifier = ">=2.30.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "s3-data-tool", git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=v0.1.0" },
 ]
 
