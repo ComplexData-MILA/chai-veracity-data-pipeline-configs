@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "backoff>=2.2.1",
     "httpx>=0.28.1",
-    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0"
+    "openai>=2.30.0",
+    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0",
 ]
