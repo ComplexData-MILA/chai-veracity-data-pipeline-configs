@@ -1,10 +1,9 @@
 #!/bin/bash
-# Cron job for retrieve - runs every 30 minutes
-# Retrieves base dataset from S3 as jsonl temp files
-
 set -e
 
 cd "$(dirname "$0")/.."
+
+export PATH="$HOME/.local/bin:$PATH"
 
 LOG_FILE="logs/retrieve_$(date +\%Y\%m\%d_\%H\%M\%S).log"
 

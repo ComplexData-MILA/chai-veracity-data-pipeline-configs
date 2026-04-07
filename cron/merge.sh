@@ -1,10 +1,9 @@
 #!/bin/bash
-# Cron job for merge - runs every 30 minutes
-# Merges jsonl temp files into parquet
-
 set -e
 
 cd "$(dirname "$0")/.."
+
+export PATH="$HOME/.local/bin:$PATH"
 
 LOG_FILE="logs/merge_$(date +\%Y\%m\%d_\%H\%M\%S).log"
 
