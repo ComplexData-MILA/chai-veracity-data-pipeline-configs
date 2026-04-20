@@ -3,10 +3,20 @@ import asyncio
 
 import backoff
 import openai
+import yaml
+import pydantic
+
 from s3_data_tool import Annotation, DataItem, S3DataTool
 
-with open("templates/feasibility_filter.txt") as template_file:
+with open("templates/extract_keywords.txt") as template_file:
     TEMPLATE = template_file.read()
+
+
+class Output(pydantic.BaseModel):
+    """Expected output from LLM."""
+
+    entities: list[str]
+    summary: str
 
 
 @backoff.on_exception(backoff.expo, [openai.APIConnectionError])
@@ -25,14 +35,11 @@ async def _generate(
     output = response.choices[0].message.content
     assert output is not None
 
-    *_explanations, _verdict = output.split("|")
-    explanation = "\n".join(_explanations)
-    verdict_int = int(_verdict)
+    output = output.removeprefix("```").removeprefix("yaml").removesuffix("```")
+    data = yaml.safe_load(output)
+    output = Output.model_validate(data)
 
-    return Annotation(
-        data={"is_feasible": verdict_int, "explanation": explanation},
-        metadata={"model_name": model_name},
-    )
+    return Annotation(data=output.model_dump(), metadata={"model_name": model_name})
 
 
 async def annotate(
@@ -59,7 +66,7 @@ async def main():
 
     async with S3DataTool().filter_for_annotation(
         name="posts",
-        annotator_name="feasibility_001",
+        annotator_name="keywords_001",
         base_columns=["text"],
     ) as annotator_view:
         await annotator_view.annotate(

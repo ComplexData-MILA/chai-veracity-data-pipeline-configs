@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cdl-annotation-feasibility
+#SBATCH --job-name=cdl-annotation
 #SBATCH --output=logs/feasibility_%j.out
 #SBATCH --error=logs/feasibility_%j.err
 
@@ -64,7 +64,13 @@ export OPENAI_API_KEY="EMPTY"
 
 uv run scripts/filter/feasibility.py \
 --model_name $MODEL_NAME \
---max_concurrency 36
+--max_concurrency 36 &
+
+uv run scripts/preprocess/extract_keywords.py \
+--model_name $MODEL_NAME \
+--max_concurrency 36 &
+
+wait
 
 EXIT_CODE=$?
 
