@@ -6,8 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "backoff>=2.2.1",
+    "faiss-cpu>=1.13.2",
     "httpx>=0.28.1",
     "openai>=2.30.0",
+    "openai-agents>=0.13.5",
     "pyyaml>=6.0.3",
     "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0",
+    "scipy>=1.17.1",
 ]
