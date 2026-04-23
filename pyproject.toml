@@ -13,4 +13,8 @@ dependencies = [
     "pyyaml>=6.0.3",
     "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0",
     "scipy>=1.17.1",
+<<<<<<< HEAD
 ]
+=======
+]
+>>>>>>> 462a869 (Add X ingestion)

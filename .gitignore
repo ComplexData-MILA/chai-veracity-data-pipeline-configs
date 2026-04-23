@@ -12,6 +12,12 @@ uv.lock
 
 # Secrets
 .env
+x_api_secrets.env
 
 # SLURM log files
 /logs
+
+# X db and usenames csv files (local test)
+scripts/ingestion/accounts.db
+scripts/ingestion/usernames.csv
+scripts/ingestion/test_output.csv
