@@ -1,0 +1,11 @@
+You are analyzing a cluster of social media posts. Identify the distinct topics being discussed within this cluster.
+
+Posts:
+{posts}
+
+Return a YAML object with a "topics" list. Each entry has:
+- topic: short label (2-5 words)
+- synopsis: one sentence describing what the posts say about this topic
+- post_indices: list of 0-based indices of posts primarily about this topic
+
+Only include topics that are clearly distinct. If all posts discuss the same topic, return a single entry. If a post spans multiple topics, include it in multiple entries.

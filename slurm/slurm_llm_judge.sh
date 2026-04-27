@@ -75,6 +75,11 @@ uv run scripts/preprocess/extract_keywords.py \
     --max_concurrency 36 &
 BG_PIDS+=($!)
 
+uv run scripts/cluster/summarize.py \
+    --model_name $MODEL_NAME \
+    --max_concurrency 16 &
+BG_PIDS+=($!)
+
 # Wait for all non-server background jobs
 FAILED=0
 for pid in "${BG_PIDS[@]}"; do
