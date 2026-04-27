@@ -42,7 +42,7 @@ Run annotation.
 
 ```bash
 # SLURM cluster and local SGLang instance
-sbatch slurm/filter_feasibility.slurm.sh
+sbatch slurm/slurm_llm_judge.sh
 
 # Alternatively, set OPENAI_BASE_URL and OPENAI_API_KEY
 uv run scripts/filter/feasibility.py \

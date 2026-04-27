@@ -4,6 +4,7 @@
 #SBATCH --error=logs/embedding_%j.err
 
 #SBATCH -c 8
+#SBATCH -p main
 #SBATCH --gres=gpu:ampere:1
 #SBATCH --mem=48GB
 #SBATCH -t 3:00:00

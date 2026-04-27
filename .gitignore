@@ -15,3 +15,6 @@ uv.lock
 
 # SLURM log files
 /logs
+
+# Analysis output
+/outputs

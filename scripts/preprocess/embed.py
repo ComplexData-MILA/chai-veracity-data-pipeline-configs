@@ -7,7 +7,7 @@ import backoff
 import openai
 import numpy as np
 
-from s3_data_tool import Annotation, DataItem, S3DataTool, RawDuckFilter
+from s3_data_tool import AllFilter, Annotation, DataItem, S3DataTool, RawDuckFilter
 
 
 def _encode_embeddings(embedding: list[float]) -> str:
@@ -222,7 +222,11 @@ async def main():
         name="posts",
         annotator_name=annotator_name,
         base_columns=["text"],
-        base_filter=RawDuckFilter(sql="length(text) > 0")
+        annotator_columns={"feasibility_001": ["is_feasible"]},
+        annotator_filters={
+            "feasibility_001": RawDuckFilter(sql="is_feasible >= 1"),
+        },
+        base_filter=RawDuckFilter(sql="length(text) > 0"),
     ) as annotator_view:
         await annotator_view.annotate(
             lambda item: coordinator.annotate(item),

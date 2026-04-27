@@ -7,7 +7,7 @@ import json
 import random
 from typing import Any
 from collections import deque
-from typing import AsyncIterator, Iterable
+from typing import AsyncIterator, AsyncIterable, Iterable, TypeVar
 from urllib.parse import urlencode
 
 import websockets
@@ -217,6 +217,26 @@ class BlueskyJetstreamPosts(AsyncIterator[dict[str, Any]]):
             raw=event,
         )
 
+T = TypeVar("T")
+
+
+async def iter_until_timeout(
+    source: AsyncIterable[T], timeout: float
+) -> AsyncIterator[T]:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    it = aiter(source)
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+
+        try:
+            yield await asyncio.wait_for(anext(it), timeout=remaining)
+        except (StopAsyncIteration, asyncio.TimeoutError):
+            return
+
 
 async def main() -> None:
     """Generate from bluesky top/trending posts."""
@@ -225,19 +245,21 @@ async def main() -> None:
     parser.add_argument("--dataset-name", default="posts")
     args = parser.parse_args()
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H")
-    batch_name = f"bsky-jetstream-{timestamp}"
-
     # Load secrets from env.
-    async with S3DataTool().dataset_generator() as dataset_generator:
-        async with BlueskyJetstreamPosts() as stream:
-            await dataset_generator.from_async_iterator(
-                stream,
-                name=args.dataset_name,
-                batch=batch_name,
-                streaming_configs=S3DataTool.StreamingConfigs(chunk_size=100),
-                deduplicate_on=["text", "source_id"],  # list of columns
-            )
+    while True:
+        async with S3DataTool().dataset_generator() as dataset_generator:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H")
+            batch_name = f"bsky-jetstream-{timestamp}"
+            print(batch_name)
+
+            async with BlueskyJetstreamPosts() as stream:
+                await dataset_generator.from_async_iterator(
+                    iter_until_timeout(stream, timeout=3600),
+                    name=args.dataset_name,
+                    batch=batch_name,
+                    streaming_configs=S3DataTool.StreamingConfigs(chunk_size=100),
+                    deduplicate_on=["text"],  # list of columns
+                )
 
 
 if __name__ == "__main__":

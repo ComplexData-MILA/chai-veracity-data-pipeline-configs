@@ -62,17 +62,27 @@ source $PROJECT_HOME/.env
 export OPENAI_BASE_URL=http://127.0.0.1:${SGLANG_PORT}/v1
 export OPENAI_API_KEY="EMPTY"
 
+# Launch long-running scripts in parallel (add more as needed)
+BG_PIDS=()
+
 uv run scripts/filter/feasibility.py \
---model_name $MODEL_NAME \
---max_concurrency 36 &
+    --model_name $MODEL_NAME \
+    --max_concurrency 36 &
+BG_PIDS+=($!)
 
 uv run scripts/preprocess/extract_keywords.py \
---model_name $MODEL_NAME \
---max_concurrency 36 &
+    --model_name $MODEL_NAME \
+    --max_concurrency 36 &
+BG_PIDS+=($!)
 
-wait
+# Wait for all non-server background jobs
+FAILED=0
+for pid in "${BG_PIDS[@]}"; do
+    wait "$pid" || FAILED=1
+done
 
-EXIT_CODE=$?
+# Stop the sglang server now that all scripts are done
+kill $SERVER_PID 2>/dev/null
+wait $SERVER_PID 2>/dev/null
 
-echo "Job finished with exit code $EXIT_CODE"
-exit $EXIT_CODE
+exit $FAILED

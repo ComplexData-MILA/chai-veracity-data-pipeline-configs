@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import base64
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -95,6 +96,7 @@ def cluster_knn_graph(
     rows: list,
     embeddings: list[np.ndarray],
     k: int | None = None,
+    drop_frac: float = 0.9,
 ) -> list[list[DataItem]]:
     """
     Cluster *rows* by building a kNN graph over their *embeddings* and
@@ -109,6 +111,8 @@ def cluster_knn_graph(
         k:          Neighbours per node.  Defaults to ceil(log2(n)), which
                     keeps the graph sparse while still connecting natural
                     neighbourhoods for corpus sizes from hundreds to millions.
+        drop_frac:  Fraction of farthest neighbor edges to prune per node
+                    (default 0.9).  Passed through to ``_build_knn_graph``.
 
     Returns:
         list[list[DataItem]] — one inner list per discovered cluster,
@@ -120,13 +124,11 @@ def cluster_knn_graph(
     n = len(rows)
 
     if k is None:
-        # log2(n) is a well-established heuristic: sparse enough to avoid
-        # merging distinct topics, dense enough to bridge legitimate clusters.
-        k = 2
+        k = math.ceil(math.log2(n))
         logger.info(f"Auto-selected k={k} for n={n} embeddings")
 
     matrix = np.stack(embeddings).astype(np.float32)
-    graph = _build_knn_graph(matrix, k=k)
+    graph = _build_knn_graph(matrix, k=k, drop_frac=drop_frac)
 
     n_clusters, labels = connected_components(graph, directed=False)
     logger.info(
