@@ -13,7 +13,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
-from s3_data_tool import S3DataTool, DataItem
+from s3_data_tool import S3DataTool, DataItem, RawDuckFilter
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,9 @@ async def _collect() -> _Collected:
         annotator_name="clustering",
         base_columns=["text"],
         annotator_columns={"embeddings_128d": ["embedding"]},
+        annotator_filters={
+            "embeddings_128d": RawDuckFilter(sql="embeddings_128d IS NOT NULL"),
+        },
     ) as generator:
         async for row in generator:
             encoded = row.data.get("embedding")

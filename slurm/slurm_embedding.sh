@@ -14,17 +14,22 @@ set -e
 export PROJECT_HOME=$HOME/20260331-chai-veracity
 export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}"
 export EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:128}"
-export VLLM_PORT="${VLLM_PORT:-30000}"
+export VLLM_PORT="${VLLM_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
 
 echo "Job ID: $SLURM_JOB_ID | Model: $MODEL_NAME | Port: $VLLM_PORT"
 
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
 
-source $SCRATCH/uv-venv/vllm/bin/activate
+# Copy shared venv to local disk to avoid BeeGFS metadata cache races.
+VENV_LOCAL="/tmp/$USER/uv-venv/vllm_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
+echo "Copying venv to $VENV_LOCAL ..."
+mkdir -pv "$VENV_LOCAL"
+cp -r "$SCRATCH/uv-venv/vllm/"* "$VENV_LOCAL"
+source "$VENV_LOCAL/bin/activate"
 
 # Build server launch command
-SERVER_CMD="$SCRATCH/uv-venv/vllm/bin/vllm serve"
+SERVER_CMD="$VENV_LOCAL/bin/vllm serve"
 SERVER_CMD="$SERVER_CMD $MODEL_NAME"
 SERVER_CMD="$SERVER_CMD --port $VLLM_PORT"
 

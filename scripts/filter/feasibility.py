@@ -21,6 +21,7 @@ async def _generate(
     response = await oai_client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
+        max_completion_tokens=4096,
     )
     output = response.choices[0].message.content
     assert output is not None
@@ -59,7 +60,7 @@ async def main():
 
     async with S3DataTool().filter_for_annotation(
         name="posts",
-        annotator_name="feasibility_001",
+        annotator_name="feasibility_llm_judge_001",
         base_columns=["text"],
     ) as annotator_view:
         await annotator_view.annotate(

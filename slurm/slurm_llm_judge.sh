@@ -16,10 +16,15 @@ export MODEL_NAME=Qwen/Qwen3.5-9B
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
 
-source $SCRATCH/uv-venv/sglang/bin/activate
+# Copy shared venv to local disk to avoid BeeGFS metadata cache races.
+VENV_LOCAL="/tmp/$USER/uv-venv/sglang_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
+echo "Copying venv to $VENV_LOCAL ..."
+mkdir -pv "$VENV_LOCAL"
+cp -r "$SCRATCH/uv-venv/sglang/"* "$VENV_LOCAL"
+source "$VENV_LOCAL/bin/activate"
 
 export TEMPLATE_NAME="${TEMPLATE_NAME:-binary_no_search}"
-export SGLANG_PORT="${SGLANG_PORT:-8000}"
+export SGLANG_PORT="${SGLANG_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
 
 echo "Job ID: $SLURM_JOB_ID | Template: $TEMPLATE_NAME | Port: $SGLANG_PORT"
 
@@ -70,15 +75,15 @@ uv run scripts/filter/feasibility.py \
     --max_concurrency 36 &
 BG_PIDS+=($!)
 
-uv run scripts/preprocess/extract_keywords.py \
-    --model_name $MODEL_NAME \
-    --max_concurrency 36 &
-BG_PIDS+=($!)
+# uv run scripts/preprocess/extract_keywords.py \
+#     --model_name $MODEL_NAME \
+#     --max_concurrency 36 &
+# BG_PIDS+=($!)
 
-uv run scripts/cluster/summarize.py \
-    --model_name $MODEL_NAME \
-    --max_concurrency 16 &
-BG_PIDS+=($!)
+# uv run scripts/cluster/summarize.py \
+#     --model_name $MODEL_NAME \
+#     --max_concurrency 16 &
+# BG_PIDS+=($!)
 
 # Wait for all non-server background jobs
 FAILED=0
