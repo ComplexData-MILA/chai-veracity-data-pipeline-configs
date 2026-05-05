@@ -9,7 +9,6 @@ with open("templates/feasibility_filter.txt") as template_file:
     TEMPLATE = template_file.read()
 
 
-@backoff.on_exception(backoff.expo, [openai.APIConnectionError])
 async def _generate(
     item: DataItem, model_name: str, oai_client: openai.AsyncOpenAI
 ) -> Annotation:
@@ -17,6 +16,9 @@ async def _generate(
 
     This function is designed to raise exceptions eagerly.
     """
+    if len(item.data["text"].strip()) == 0:
+        return Annotation(data={"explanation": "Empty text."})
+
     prompt = TEMPLATE.format(text=item.data["text"])
     response = await oai_client.chat.completions.create(
         model=model_name,

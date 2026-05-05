@@ -55,7 +55,7 @@ uv run scripts/filter/feasibility.py \
 Set up the training virtual environment (one-time):
 
 ```bash
-VENV_BASE=$SCRATCH/uv-venv/train
+VENV_BASE=$HOME/uv-venv/train
 source $VENV_BASE/bin/activate
 uv pip install torch transformers scikit-learn tqdm
 ```
