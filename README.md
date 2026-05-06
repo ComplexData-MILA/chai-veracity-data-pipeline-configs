@@ -94,3 +94,84 @@ N=$(wc -l < params.txt) && sbatch --array=1-$N slurm/slurm_train_classifier_swee
 
 Each array task sources its line from `params.txt` and saves its best checkpoint under `$SCRATCH/20260331-chai-veracity/classifier_models/`.
 
+Collect results into a sorted table using:
+
+```bash
+uv run scripts/train_classifier/aggregate_sweep.py logs/classifier_${SLURM_JOB_ID}_*.out
+```
+
+Copy hyperparameters from the log file (a list of environment variables) and launch the train job with these parameters.
+
+```bash
+WEIGHT_DECAY=0.01 EPOCHS=10 WARMUP_RATIO=0.1 MAX_LENGTH=512 LR=5e-05 BATCH_SIZE=8 SEED=365 sbatch slurm/slurm_train_classifier.sh
+```
+
+## Evaluate Classifier on External Data
+
+### 1. Prepare external evaluation data
+
+Convert the external feasibility annotations into the classifier-compatible JSONL format, split by annotator. Reports Fleiss' Kappa inter-annotator agreement on claims where both annotators labeled.
+
+```bash
+uv run python scripts/analysis/prepare_external_eval_data.py
+```
+
+This writes `annotator_a.jsonl` and `annotator_b.jsonl` to `$SCRATCH/external_eval_data/`.
+
+### 2. Evaluate the trained classifier
+
+Launch a vLLM server with the trained classifier checkpoint and run evaluation against one or more test JSONL files. Reports per-file accuracy and Fleiss' Kappa; when multiple files are provided, also reports combined Fleiss' Kappa across the model and all annotators.
+
+```bash
+MODEL_PATH=$SCRATCH/20260331-chai-veracity/classifier_models/lr5e-05_bs8_wd0.01_seed365/best_model \
+    sbatch slurm/eval/classfier_eval.sh
+```
+
+Override the test files via `TEST_FILES` (space-separated paths):
+
+```bash
+MODEL_PATH=$SCRATCH/20260331-chai-veracity/classifier_models/lr5e-05_bs8_wd0.01_seed365/best_model \
+    TEST_FILES="$SCRATCH/external_eval_data/annotator_a.jsonl $SCRATCH/external_eval_data/annotator_b.jsonl" \
+    sbatch slurm/eval/classfier_eval.sh
+```
+
+Or run directly against an already-running vLLM server:
+
+```bash
+uv run python scripts/analysis/evaluation_classifier.py \
+    --test_files $SCRATCH/external_eval_data/annotator_a.jsonl \
+                  $SCRATCH/external_eval_data/annotator_b.jsonl \
+    --base_url http://127.0.0.1:8000 \
+    --model_name custom-classifier
+```
+
+### 3. Evaluate the LLM judge
+
+Run the LLM feasibility judge (from `scripts/filter/feasibility.py`) against the same test data. Reports the same metrics as the classifier evaluation.
+
+**Via SLURM** (spins up a vLLM server with the judge model):
+
+```bash
+MODEL_NAME=Qwen/Qwen3.5-9B \
+    sbatch slurm/eval/llm_judge_eval.sh
+```
+
+Override the test files via `TEST_FILES`:
+
+```bash
+MODEL_NAME=Qwen/Qwen3.5-9B \
+    TEST_FILES="$SCRATCH/external_eval_data/annotator_a.jsonl $SCRATCH/external_eval_data/annotator_b.jsonl" \
+    sbatch slurm/eval/llm_judge_eval.sh
+```
+
+**Direct invocation** (against an already-running OpenAI-compatible API):
+
+```bash
+uv run python scripts/analysis/evaluation_llm_judge.py \
+    --test_files $SCRATCH/external_eval_data/annotator_a.jsonl \
+                  $SCRATCH/external_eval_data/annotator_b.jsonl \
+    --model_name gpt-4.1 \
+    --base_url $OPENAI_BASE_URL \
+    --api_key $OPENAI_API_KEY \
+    --max_concurrency 32
+```
