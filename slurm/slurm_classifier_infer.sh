@@ -20,12 +20,28 @@ echo "Job ID: $SLURM_JOB_ID | Model: $MODEL_PATH | Port: $VLLM_PORT"
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
 
-# Copy shared venv to local disk to avoid BeeGFS metadata cache races.
-VENV_LOCAL="/tmp/$USER/uv-venv/vllm-20260503_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
-echo "Copying venv to $VENV_LOCAL ..."
-mkdir -pv "$VENV_LOCAL"
-cp -r $SCRATCH/uv-venv/vllm-20260503/* "$VENV_LOCAL"
+# Transfer venv tarball to local disk to avoid BeeGFS metadata cache races.
+VENV_LOCAL="/tmp/$USER/uv-venv/vllm_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
+echo "Extracting venv tarball to $VENV_LOCAL ..."
+mkdir -pv "$(dirname "$VENV_LOCAL")"
+tar -xzf "$SCRATCH/uv-venv/vllm.tar.gz" -C "$(dirname "$VENV_LOCAL")"
+# Rename the extracted directory if the tarball root differs from VENV_LOCAL
+EXTRACTED_DIR="$(dirname "$VENV_LOCAL")/$(tar -tzf "$SCRATCH/uv-venv/vllm.tar.gz" | head -1 | cut -d/ -f1)"
+echo Extracting to $EXTRACTED_DIR
+echo Using local venv copy at $VENV_LOCAL
+[ "$EXTRACTED_DIR" != "$VENV_LOCAL" ] && mv "$EXTRACTED_DIR" "$VENV_LOCAL"
+# Fix hardcoded paths in the extracted venv
+OLD_VENV=$(grep "^VIRTUAL_ENV=" "$VENV_LOCAL/bin/activate" | head -1 | sed "s/VIRTUAL_ENV=//;s/['\"]//g")
+sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate"
+[ -f "$VENV_LOCAL/bin/activate.csh" ] && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate.csh"
+[ -f "$VENV_LOCAL/bin/activate.fish" ] && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate.fish"
+# Fix shebangs in bin scripts that reference the old venv
+for f in "$VENV_LOCAL/bin/"*; do
+    [ -f "$f" ] && [ ! -L "$f" ] && head -c2 "$f" | grep -q '#!' && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$f"
+done
+unset UV_VENVS_BASE VIRTUAL_ENV
 source "$VENV_LOCAL/bin/activate"
+export
 
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 

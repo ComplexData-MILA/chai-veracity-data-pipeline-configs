@@ -45,7 +45,7 @@ requires-dist = [
     { name = "openai-agents", specifier = ">=0.13.5" },
     { name = "pandas", specifier = ">=3.0.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "s3-data-tool", git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=v0.1.5" },
+    { name = "s3-data-tool", git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=c67e057e35b7ca66d6e908d6a66c87e2e6e063d7" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]
@@ -1867,7 +1867,7 @@ wheels = [
 [[package]]
 name = "s3-data-tool"
 version = "0.1.0"
-source = { git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=v0.1.5#1b3ae7aa00222d0082db1fa4ffd321440031016d" }
+source = { git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=c67e057e35b7ca66d6e908d6a66c87e2e6e063d7#c67e057e35b7ca66d6e908d6a66c87e2e6e063d7" }
 dependencies = [
     { name = "aioboto3" },
     { name = "duckdb" },

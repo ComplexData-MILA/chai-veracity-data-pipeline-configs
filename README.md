@@ -106,6 +106,14 @@ Copy hyperparameters from the log file (a list of environment variables) and lau
 WEIGHT_DECAY=0.01 EPOCHS=10 WARMUP_RATIO=0.1 MAX_LENGTH=512 LR=5e-05 BATCH_SIZE=8 SEED=365 sbatch slurm/slurm_train_classifier.sh
 ```
 
+Run annotation on full dataset:
+
+```bash
+MODEL_PATH=$SCRATCH/20260331-chai-veracity/classifier_models/lr5e-05_bs8_wd0.01_seed365/best_model
+MODEL_NAME=20260506_lr5e-05_bs8_wd0.01_seed365
+sbatch --array=1-10 slurm/slurm_classifier_infer.sh
+```
+
 ## Evaluate Classifier on External Data
 
 ### 1. Prepare external evaluation data

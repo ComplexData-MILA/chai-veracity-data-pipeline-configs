@@ -47,7 +47,6 @@ async def stream_and_collect(
         with tqdm() as pbar:
             async for _row in annotator_view:
                 data = _row.data
-                print(data)
                 label = data.get("is_feasible")
 
                 if label not in buckets:
