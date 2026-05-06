@@ -16,38 +16,47 @@ export MODEL_NAME=Qwen/Qwen3.5-9B
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
 
-# Copy shared venv to local disk to avoid BeeGFS metadata cache races.
-VENV_LOCAL="/tmp/$USER/uv-venv/sglang_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
-echo "Copying venv to $VENV_LOCAL ..."
-mkdir -pv "$VENV_LOCAL"
-cp -r "$SCRATCH/uv-venv/sglang/"* "$VENV_LOCAL"
+# Transfer venv tarball to local disk to avoid BeeGFS metadata cache races.
+VENV_LOCAL="/tmp/$USER/uv-venv/vllm_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
+echo "Extracting venv tarball to $VENV_LOCAL ..."
+mkdir -pv "$(dirname "$VENV_LOCAL")"
+tar -xzf "$SCRATCH/uv-venv/vllm.tar.gz" -C "$(dirname "$VENV_LOCAL")"
+# Rename the extracted directory if the tarball root differs from VENV_LOCAL
+EXTRACTED_DIR="$(dirname "$VENV_LOCAL")/$(tar -tzf "$SCRATCH/uv-venv/vllm.tar.gz" | head -1 | cut -d/ -f1)"
+echo Extracting to $EXTRACTED_DIR
+echo Using local venv copy at $VENV_LOCAL
+[ "$EXTRACTED_DIR" != "$VENV_LOCAL" ] && mv "$EXTRACTED_DIR" "$VENV_LOCAL"
+# Fix hardcoded paths in the extracted venv
+OLD_VENV=$(grep "^VIRTUAL_ENV=" "$VENV_LOCAL/bin/activate" | head -1 | sed "s/VIRTUAL_ENV=//;s/['\"]//g")
+sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate"
+[ -f "$VENV_LOCAL/bin/activate.csh" ] && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate.csh"
+[ -f "$VENV_LOCAL/bin/activate.fish" ] && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate.fish"
+# Fix shebangs in bin scripts that reference the old venv
+for f in "$VENV_LOCAL/bin/"*; do
+    [ -f "$f" ] && [ ! -L "$f" ] && head -c2 "$f" | grep -q '#!' && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$f"
+done
+unset UV_VENVS_BASE VIRTUAL_ENV
 source "$VENV_LOCAL/bin/activate"
+export
 
-export TEMPLATE_NAME="${TEMPLATE_NAME:-binary_no_search}"
-export SGLANG_PORT="${SGLANG_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
+export VLLM_PORT="${VLLM_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
 
-echo "Job ID: $SLURM_JOB_ID | Template: $TEMPLATE_NAME | Port: $SGLANG_PORT"
+echo "Job ID: $SLURM_JOB_ID | Port: $VLLM_PORT"
 
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 
-$VIRTUAL_ENV/bin/python -m sglang.launch_server \
-    --model-path $MODEL_NAME \
-    --port $SGLANG_PORT \
-    --tp-size 1 \
-    --mem-fraction-static 0.8 \
-    --context-length 262144 \
-    --reasoning-parser qwen3 \
-    --speculative-algo NEXTN \
-    --speculative-num-steps 3 \
-    --speculative-eagle-topk 1 \
-    --speculative-num-draft-tokens 4 &
+vllm serve $MODEL_NAME \
+    --port $VLLM_PORT \
+    --tensor-parallel-size 1 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3 &
 
 SERVER_PID=$!
 echo SERVER_PID: $SERVER_PID
-echo "Waiting for SGLang server to start..."
+echo "Waiting for vLLM server to start..."
 max_retries=180
 retry_count=0
-while ! curl -s "http://127.0.0.1:${SGLANG_PORT}/health" > /dev/null; do
+while ! curl -s "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null; do
     if [ $retry_count -ge $max_retries ]; then
         echo "Server failed to start within timeout."
         exit 1
@@ -64,7 +73,7 @@ deactivate
 cd $PROJECT_HOME
 source $PROJECT_HOME/.env
 
-export OPENAI_BASE_URL=http://127.0.0.1:${SGLANG_PORT}/v1
+export OPENAI_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1
 export OPENAI_API_KEY="EMPTY"
 
 # Launch long-running scripts in parallel (add more as needed)
@@ -91,7 +100,7 @@ for pid in "${BG_PIDS[@]}"; do
     wait "$pid" || FAILED=1
 done
 
-# Stop the sglang server now that all scripts are done
+# Stop the vLLM server now that all scripts are done
 kill $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
 

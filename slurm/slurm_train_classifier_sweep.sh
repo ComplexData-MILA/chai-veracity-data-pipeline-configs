@@ -44,12 +44,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-$BASE_DIR/classifier_models/lr${LR}_bs${BATCH_SIZE}_wd
 echo "Job ${SLURM_ARRAY_JOB_ID}:${SLURM_ARRAY_TASK_ID} | LR=$LR BS=$BATCH_SIZE WD=$WEIGHT_DECAY SEED=$SEED"
 echo "Output: $OUTPUT_DIR"
 
-# Copy shared venv to local disk to avoid BeeGFS metadata cache races.
-VENV_LOCAL="/tmp/$USER/uv-venv/train_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
-mkdir -pv "$VENV_LOCAL"
-uv venv $VENV_LOCAL
-source "$VENV_LOCAL/bin/activate"
-uv pip install torch transformers scikit-learn tqdm
+VENV_BASE=$HOME/uv-venv/train
+source "$VENV_BASE/bin/activate"
 
 python3 scripts/train_classifier/train.py \
 --data_dir "$DATA_DIR" \
