@@ -70,8 +70,21 @@ uv run --env-file .env python scripts/cluster/clustering.py \
 | `--k` | auto (`log2(n)`) | kNN neighbours per node. Lower = sparser graph = more clusters. |
 | `--drop-frac` | `0.95` | Fraction of farthest neighbor edges to prune per node. Higher = sparser graph = more clusters. |
 | `--dataset-name` | `posts_clustered_001` | Target dataset name in S3. |
+| `--min-cluster-size` | `0` | Merge clusters smaller than this into nearest larger cluster (`0` = disabled). |
+| `--max-cluster-size` | `0` | Split clusters larger than this by re-clustering (`0` = disabled). |
+| `--split-k-scale` | `0.5` | Multiplier for `k` when sub-clustering oversized components. |
+| `--outlier-threshold` | `0.0` | Cosine similarity floor. Small clusters below this vs all large clusters are dropped as outliers (`0.0` = disabled). Only active with `--min-cluster-size`. |
 
 The default `--drop-frac 0.95` keeps only the single closest neighbor per node (with `k=14`), producing many small topic-specific clusters. Use `--drop-frac 0.9` (keep ~2 edges) for fewer, larger clusters, or `--drop-frac 0.8` (keep ~3 edges) for even coarser granularity.
+
+To balance cluster sizes, combine `--min-cluster-size` and `--max-cluster-size`:
+```bash
+uv run --env-file .env python scripts/cluster/clustering.py \
+--limit 1 --k 14 --drop-frac 0.95 \
+--min-cluster-size 5 --max-cluster-size 100 \
+--outlier-threshold 0.3
+```
+This merges clusters smaller than 5 posts, splits clusters larger than 100 posts (using k-means fallback when kNN can't find boundaries), and drops clusters whose embedding centroid is less than 0.3 cosine-similar to any larger cluster.
 
 Each day's clusters are uploaded as a separate batch named `bsky-trending-{YYYYMMDD}`.
 
