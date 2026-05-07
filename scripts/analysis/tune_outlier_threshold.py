@@ -12,16 +12,17 @@ Usage:
         --mode manual --limit 1
 
     uv run --env-file .env python scripts/analysis/tune_outlier_threshold.py \\
-        --mode llm --limit 1 --thresholds 0.2,0.3,0.4 --model-name gpt-4.1
+        --mode llm --limit 1 --thresholds 0.2,0.3,0.4 --model-name $MODEL_NAME
 """
 
 import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import random
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -57,7 +58,7 @@ def _format_prompt(template: str, texts: list[str]) -> str:
 
 async def _collect_candidates(
     limit: int,
-    k: int,
+    k: int | None,
     drop_frac: float,
     min_cluster_size: int,
     max_cluster_size: int,
@@ -86,6 +87,10 @@ async def _collect_candidates(
             continue
 
         logger.info("Day %s: collected %d embeddings.", day, len(collected.rows))
+
+        if k is None:
+            k = math.ceil(math.log2(len(collected.rows)))
+            logger.info("k not specified, using ceil(log2(n)) = %d.", k)
 
         clusters, diagnostics = cluster_knn_graph_with_diagnostics(
             collected.rows,
@@ -187,7 +192,7 @@ async def _llm_judge_cluster(
 ) -> int | None:
     """Ask LLM: is this cluster coherent (1) or noise (0)? Returns None on failure."""
     # Truncate to avoid token limits
-    truncated = texts[:10]
+    truncated = texts[:32]
     prompt = _format_prompt(template, truncated)
 
     async with semaphore:
@@ -251,8 +256,7 @@ async def _llm_evaluate(
             n_above = sample_size - n_below
             if n_above > len(above):
                 n_below = sample_size - len(above)
-            import random
-            rng = random.Random(42)
+            rng = random.Random(18)
             sampled = rng.sample(below, n_below) + rng.sample(above, n_above)
         else:
             sampled = near
@@ -351,17 +355,17 @@ def _plot_llm_results(
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Tune outlier_threshold for clustering")
     parser.add_argument("--limit", type=int, default=1)
-    parser.add_argument("--k", type=int, default=14)
+    parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--drop-frac", type=float, default=0.95)
     parser.add_argument("--min-cluster-size", type=int, default=5)
-    parser.add_argument("--max-cluster-size", type=int, default=0)
+    parser.add_argument("--max-cluster-size", type=int, default=50)
     parser.add_argument("--split-k-scale", type=float, default=0.5)
     parser.add_argument("--mode", choices=["manual", "llm", "full"], default="manual")
     parser.add_argument("--thresholds", default="0.1,0.2,0.3,0.4,0.5")
-    parser.add_argument("--sample-size", type=int, default=20)
+    parser.add_argument("--sample-size", type=int, default=50)
     parser.add_argument("--model-name", default=None)
     parser.add_argument("--max-concurrency", type=int, default=16)
-    parser.add_argument("--output-dir", default=".")
+    parser.add_argument("--output-dir", default="output/")
     args = parser.parse_args()
 
     thresholds = [float(t.strip()) for t in args.thresholds.split(",")]
@@ -392,7 +396,7 @@ async def main() -> None:
         _export_manual(candidates, diagnostics, output_path)
 
     if args.mode in ("llm", "full"):
-        model_name = args.model_name or os.environ.get("MODEL_NAME", "gpt-4.1")
+        model_name = args.model_name or os.environ["MODEL_NAME"]
         results = await _llm_evaluate(
             candidates, diagnostics, thresholds,
             model_name, args.max_concurrency, args.sample_size,

@@ -88,6 +88,39 @@ This merges clusters smaller than 5 posts, splits clusters larger than 100 posts
 
 Each day's clusters are uploaded as a separate batch named `bsky-trending-{YYYYMMDD}`.
 
+### Tune Clustering Hyperparameters with LLM-as-a-Judge
+
+Sweep `drop_frac` × `min_cluster_size` × `outlier_threshold` and evaluate cluster topic coherence via LLM:
+
+```bash
+uv run --env-file .env --env-file .llm.env python scripts/analysis/tune_clustering.py \
+--drop-frac "0.5,0.8,0.9" \
+--min-cluster-size "2,5,10" \
+--outlier-threshold "0.1,0.2,0.5" \
+--sample-size 10 --n-judge-runs 5 \
+--max-concurrency 32 \
+--limit 1 \
+--output-dir outputs/tune_clustering
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--drop-frac` | `0.1,0.5,0.8,0.9,0.95,0.99` | Comma-separated drop_frac values to sweep |
+| `--min-cluster-size` | `2,3,5,10` | Comma-separated min_cluster_size values to sweep |
+| `--sample-size` | `20` | Clusters to sample per run for LLM evaluation |
+| `--n-judge-runs` | `1` | Independent sampling+judging runs per combo; `>=2` enables 95% t-interval CI columns (SEM, CI low/high) and `±SEM` annotations on the coherence heatmap |
+| `--model-name` | env `MODEL_NAME` | OpenAI-compatible model for judging cluster coherence |
+| `--max-concurrency` | `16` | Max concurrent LLM API calls |
+| `--outlier-threshold` | `0.0` | Comma-separated outlier_threshold values to sweep |
+| `--limit` | `1` | Days to process |
+| `--k` | auto (`log2(n)`) | kNN neighbours |
+| `--max-cluster-size` | `50` | Max cluster size before splitting |
+| `--seed` | `42` | Random seed for cluster sampling |
+
+Results are saved to `outputs/tune_clustering/results.csv` (pandas table), `results.json` (full diagnostics), and per-threshold heatmaps (`coherence_heatmap_thr000.png`, `cluster_count_heatmap_thr000.png`, etc.).
+
 ## Distill Annotations into Classifier
 
 Set up the training virtual environment (one-time):

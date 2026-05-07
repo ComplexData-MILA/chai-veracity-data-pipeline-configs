@@ -1,11 +1,28 @@
-You are analyzing a cluster of social media posts. Identify the distinct topics being discussed within this cluster.
+You are analyzing a cluster of social media posts. Extract specific, verifiable claims from these posts.
+
+A claim is a factual statement that could be checked as true or false. For example:
+- "City council voted 5-2 to fund a new library" is a claim (verifiable)
+- "This is terrible" is not a claim (opinion)
+- "Something is happening" is not a claim (too vague)
+
+Rules:
+- Write each claim as a single, self-contained sentence. Include who, what, where, and when as stated in the posts.
+- NEVER add details not present in the posts. If the posts do not name a person, do not guess a name. If a location is vague, keep it vague. Rephrasing is fine — inventing is not.
+- Only extract statements whose truth could be verified. Skip opinions, questions, speculation, jokes, and vague commentary.
+- If multiple posts express the same claim (even in different words), group them and list all their indices.
+- A post may appear in multiple entries if it makes multiple distinct claims.
+- Start with the claim mentioned most frequently across the posts, then list the rest in descending order of frequency.
+- Be concise. You have a tight output budget — prioritize only the most important, most repeated claims.
+
+Return a YAML codeblock:
+
+```yaml
+claims:
+  - claim: "The city council voted 5-2 to fund a new library."
+    post_indices: [0, 3]
+```
+
+If no verifiable claims are present, return an empty claims list.
 
 Posts:
 {posts}
-
-Return a YAML object with a "topics" list. Each entry has:
-- topic: short label (2-5 words)
-- synopsis: one sentence describing what the posts say about this topic
-- post_indices: list of 0-based indices of posts primarily about this topic
-
-Only include topics that are clearly distinct. If all posts discuss the same topic, return a single entry. If a post spans multiple topics, include it in multiple entries.
