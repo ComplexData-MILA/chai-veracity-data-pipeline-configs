@@ -50,6 +50,31 @@ uv run scripts/filter/feasibility.py \
 --max_concurrency 36
 ```
 
+## Cluster Posts by Embedding Similarity
+
+Cluster posts one day at a time using a kNN-graph + connected-components approach. Each day's posts are loaded from S3 (base dataset joined with 128-d embeddings), a sparse kNN graph is built over cosine similarity, and connected components become clusters. Results are uploaded back to S3 as a new dataset.
+
+```bash
+uv run --env-file .env python scripts/cluster/clustering.py \
+--limit 1 \
+--k 14 \
+--drop-frac 0.95 \
+--dataset-name posts_clustered_001
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--limit` | `1` | Max days to process (`0` = all days). Only days with embeddings count. |
+| `--k` | auto (`log2(n)`) | kNN neighbours per node. Lower = sparser graph = more clusters. |
+| `--drop-frac` | `0.95` | Fraction of farthest neighbor edges to prune per node. Higher = sparser graph = more clusters. |
+| `--dataset-name` | `posts_clustered_001` | Target dataset name in S3. |
+
+The default `--drop-frac 0.95` keeps only the single closest neighbor per node (with `k=14`), producing many small topic-specific clusters. Use `--drop-frac 0.9` (keep ~2 edges) for fewer, larger clusters, or `--drop-frac 0.8` (keep ~3 edges) for even coarser granularity.
+
+Each day's clusters are uploaded as a separate batch named `bsky-trending-{YYYYMMDD}`.
+
 ## Distill Annotations into Classifier
 
 Set up the training virtual environment (one-time):

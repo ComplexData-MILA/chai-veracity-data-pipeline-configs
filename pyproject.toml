@@ -14,7 +14,7 @@ dependencies = [
     "openai-agents>=0.13.5",
     "pandas>=3.0.2",
     "pyyaml>=6.0.3",
-    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@c67e057e35b7ca66d6e908d6a66c87e2e6e063d7",
+    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@7983135cfa8a6db14ef0c34c7139eb9b54599e54",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
 ]

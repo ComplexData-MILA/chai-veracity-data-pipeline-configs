@@ -3,22 +3,46 @@ import asyncio
 import os
 
 from datasets import Dataset
-from s3_data_tool import S3DataTool, RawDuckFilter
+from pydantic import BaseModel
+from s3_data_tool import S3DataTool, FilterNode, RawDuckFilter
 
 
-async def main(hub_path: str | None = None, private: bool = False):
-    async with S3DataTool().filter_for_annotation(
-        annotator_name="export_001", # placeholder to prevent concurrent runs
+class ExportConfig(BaseModel):
+    """Configuration for a single export mode."""
+
+    name: str
+    base_columns: list[str]
+    annotator_columns: dict[str, list[str]] = {}
+    annotator_filters: dict[str, FilterNode] = {}
+    base_filter: FilterNode | None = None
+
+
+EXPORT_MODES: dict[str, ExportConfig] = {
+    "classifier_hits": ExportConfig(
         name="posts",
-        base_columns=["text"],
+        base_columns=["created_at", "at_uri", "uri", "text"],
         annotator_columns={
-            "feasibility_classifier_001": ["classifier_label", "classifier_probs"]
+            "feasibility_classifier_001": ["classifier_label", "classifier_probs"],
         },
         annotator_filters={
             "feasibility_classifier_001": RawDuckFilter(
-                sql="classifier_label = '\"LABEL_1\"'",  # raw values are JSON-encoded strings: "LABEL_1"
+                sql="classifier_label = '\"LABEL_1\"'",
             ),
         },
+    ),
+}
+
+
+async def main(mode: str, hub_path: str | None = None, private: bool = False):
+    config = EXPORT_MODES[mode]
+
+    async with S3DataTool().filter_for_annotation(
+        annotator_name="export_001",  # placeholder to prevent concurrent runs
+        name=config.name,
+        base_columns=config.base_columns,
+        annotator_columns=config.annotator_columns or None,
+        annotator_filters=config.annotator_filters or None,
+        base_filter=config.base_filter,
     ) as generator:
         rows = [row.data async for row in generator]
 
@@ -42,6 +66,13 @@ if __name__ == "__main__":
         description="Export S3 annotation data to a HuggingFace dataset."
     )
     parser.add_argument(
+        "--mode",
+        default="classifier_hits",
+        choices=list(EXPORT_MODES.keys()),
+        help="Export mode selecting which dataset/columns/filters to use. "
+        f"Available: {', '.join(EXPORT_MODES)}.",
+    )
+    parser.add_argument(
         "--hub-path",
         default=os.environ.get("HF_HUB_PATH"),
         help="HuggingFace Hub repo path (e.g. 'my-org/my-dataset'). "
@@ -54,4 +85,4 @@ if __name__ == "__main__":
         help="Create a private repo on the Hub. Can also set via HF_PRIVATE=true env var.",
     )
     args = parser.parse_args()
-    asyncio.run(main(hub_path=args.hub_path, private=args.private))
+    asyncio.run(main(mode=args.mode, hub_path=args.hub_path, private=args.private))

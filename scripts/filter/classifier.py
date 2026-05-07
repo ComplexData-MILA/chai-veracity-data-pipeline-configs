@@ -99,6 +99,7 @@ async def main():
             name="posts",
             annotator_name="feasibility_classifier_001",
             base_columns=["text"],
+            fraction=0.01,
         ) as annotator_view:
             await annotator_view.annotate(
                 lambda item: coordinator.annotate(item),

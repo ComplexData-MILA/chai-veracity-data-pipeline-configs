@@ -5,7 +5,6 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import AsyncIterator, Any
 
 import faiss
@@ -14,6 +13,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from s3_data_tool import S3DataTool, DataItem, RawDuckFilter
+from s3_data_tool.s3_utils import enumerate_batches  # not in __all__; import from submodule
 
 logger = logging.getLogger(__name__)
 
@@ -28,24 +28,53 @@ class _Collected:
     embeddings: list[np.ndarray] = field(default_factory=list)
 
 
-async def _collect() -> _Collected:
+async def _collect(batches: list[str] | None = None) -> _Collected:
     result = _Collected()
-    async with S3DataTool().filter_for_annotation(
+    total_rows = 0
+    async with S3DataTool().filter_for_export(
         name="posts",
-        annotator_name="clustering",
         base_columns=["text"],
         annotator_columns={"embeddings_128d": ["embedding"]},
         annotator_filters={
-            "embeddings_128d": RawDuckFilter(sql="embeddings_128d IS NOT NULL"),
+            "embeddings_128d": RawDuckFilter(sql="embedding IS NOT NULL"),
         },
     ) as generator:
-        async for row in generator:
+        async for row in generator._iter_filtered_items(batches=batches):
+            total_rows += 1
             encoded = row.data.get("embedding")
             if not encoded:
                 continue
             result.rows.append(row)
             result.embeddings.append(_decode_embeddings(encoded))
+    logger.info("Query returned %d rows, %d have embeddings.", total_rows, len(result.rows))
     return result
+
+
+async def _list_batches() -> list[str]:
+    s3_tool = S3DataTool()
+    kwargs = {}
+    if s3_tool._endpoint_url:
+        kwargs["endpoint_url"] = s3_tool._endpoint_url
+    async with s3_tool._session.client("s3", **kwargs) as s3_client:
+        return await enumerate_batches(
+            s3_client, s3_tool._bucket, s3_tool._prefix, "posts"
+        )
+
+
+import re
+
+_DAY_RE = re.compile(r"(\d{8})")  # extract YYYYMMDD from batch names
+
+
+def _group_batches_by_day(batches: list[str]) -> dict[str, list[str]]:
+    """Group batch names by the 8-digit YYYYMMDD date embedded in them."""
+    days: dict[str, list[str]] = defaultdict(list)
+    for batch in batches:
+        if m := _DAY_RE.search(batch):
+            days[m.group(1)].append(batch)
+        else:
+            logger.warning("Could not parse date from batch name %r; skipping.", batch)
+    return dict(days)
 
 
 def _build_knn_graph(
@@ -168,38 +197,78 @@ async def _get_cluster_iterator(
         buffer = defaultdict(list)
 
 
-async def main() -> list[list]:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--dataset-name", default="posts_clustered_001")
-    args = parser.parse_args()
-    timestamp = datetime.now().strftime("%Y%m%d-%H")
-    batch_name = f"bsky-trending-{timestamp}"
+async def _process_day(
+    day: str,
+    day_batches: list[str],
+    dataset_name: str,
+    k: int | None = None,
+    drop_frac: float = 0.9,
+) -> list[list[DataItem]]:
+    """Collect, cluster, and upload one day's worth of data."""
+    logger.info(
+        "Day %s: processing %d batches (%s ... %s)",
+        day, len(day_batches), day_batches[0], day_batches[-1],
+    )
 
-    collected = await _collect()
+    collected = await _collect(batches=day_batches)
 
     if not collected.rows:
-        logger.warning("No embeddings found; nothing to cluster.")
+        logger.warning("Day %s: no embeddings found; skipping.", day)
         return []
 
-    logger.info("Collected %d embeddings.", len(collected.rows))
+    logger.info("Day %s: collected %d embeddings.", day, len(collected.rows))
 
-    clusters = cluster_knn_graph(collected.rows, collected.embeddings)
+    clusters = cluster_knn_graph(
+        collected.rows, collected.embeddings, k=k, drop_frac=drop_frac,
+    )
 
     for i, cluster in enumerate(clusters):
-        logger.info("Cluster %d: %d items", i, len(cluster))
+        logger.info("Day %s cluster %d: %d items", day, i, len(cluster))
 
+    batch_name = f"bsky-trending-{day}"
     async with S3DataTool().dataset_generator() as dataset_generator:
-        # Add rows to the dataset named "example_dataset"
         await dataset_generator.from_async_iterator(
             _get_cluster_iterator(clusters),
-            name=args.dataset_name,
+            name=dataset_name,
             batch=batch_name,
-            streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
-            deduplicate_on=["text", "source_id"],  # list of columns
+            streaming_configs=S3DataTool.StreamingConfigs(chunk_size=1),
+            deduplicate_on=["text", "source_id"],
         )
 
+    logger.info("Day %s: uploaded %d clusters as batch %r.", day, len(clusters), batch_name)
     return clusters
+
+
+async def main() -> list[list]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=1, help="Max days to process (default: 1, 0=all)")
+    parser.add_argument("--dataset-name", default="posts_clustered_001")
+    parser.add_argument("--k", type=int, default=None, help="kNN neighbours per node (default: log2(n))")
+    parser.add_argument("--drop-frac", type=float, default=0.95, help="Fraction of farthest edges to prune (default: 0.95)")
+    args = parser.parse_args()
+
+    all_batches = await _list_batches()
+    days = _group_batches_by_day(all_batches)
+    logger.info(
+        "Found %d batches across %d days.",
+        len(all_batches), len(days),
+    )
+
+    sorted_days = sorted(days.keys())
+
+    all_clusters: list[list] = []
+    processed = 0
+    for day in sorted_days:
+        if args.limit > 0 and processed >= args.limit:
+            break
+        clusters = await _process_day(
+            day, days[day], args.dataset_name, k=args.k, drop_frac=args.drop_frac,
+        )
+        if clusters:  # only count days that yielded results
+            processed += 1
+            all_clusters.extend(clusters)
+
+    return all_clusters
 
 
 if __name__ == "__main__":

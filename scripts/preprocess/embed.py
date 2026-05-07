@@ -129,8 +129,7 @@ async def main():
                     sql="classifier_label = '\"LABEL_1\"'",  # raw values are JSON-encoded strings: "LABEL_1"
                 ),
             },
-            base_filter=RawDuckFilter(sql="length(text) > 0"),
-            fraction=0.1,
+            fraction=0.05,
         ) as annotator_view
     ):
         await annotator_view.annotate(
