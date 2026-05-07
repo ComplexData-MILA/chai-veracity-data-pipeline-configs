@@ -39,7 +39,7 @@ unset UV_VENVS_BASE VIRTUAL_ENV
 source "$VENV_LOCAL/bin/activate"
 export
 
-export VLLM_PORT="${VLLM_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
+export VLLM_PORT="${VLLM_PORT:-$((8000 + 10#${SLURM_JOB_ID: -3}))}"
 
 echo "Job ID: $SLURM_JOB_ID | Port: $VLLM_PORT"
 
@@ -83,7 +83,7 @@ uv run scripts/analysis/compare_dataset_quality.py \
     --model-name $MODEL_NAME \
     --n-samples 100 \
     --n-judge-runs 5 \
-    --max-concurrency 36 \
+    --max-concurrency 128 \
     --output-dir outputs/compare_dataset_quality &
 BG_PIDS+=($!)
 

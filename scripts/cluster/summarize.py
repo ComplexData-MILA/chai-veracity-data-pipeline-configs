@@ -101,6 +101,7 @@ async def _get_topic_iterator(
     max_concurrency: int,
     max_retries: int,
     max_tokens: int,
+    max_texts_per_cluster: int,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream clusters, summarize each, yield one row per topic."""
     sem = asyncio.Semaphore(max_concurrency)
@@ -108,6 +109,13 @@ async def _get_topic_iterator(
     _DATE_RE = re.compile(r"(\d{8})")
 
     async def _process(item: DataItem) -> list[dict[str, Any]]:
+        try:
+            return await _process_inner(item)
+        except Exception:
+            logger.exception("Skipping cluster %s due to error", item.id)
+            return []
+
+    async def _process_inner(item: DataItem) -> list[dict[str, Any]]:
         texts = item.data.get("text", [])
         original_ids = item.data.get("original_ids", [])
         if not texts:
@@ -116,9 +124,10 @@ async def _get_topic_iterator(
         date_match = _DATE_RE.search(item.batch)
         date_str = date_match.group(1) if date_match else ""
 
+        prompt_texts = texts[:max_texts_per_cluster]
         async with sem:
             result = await _summarize_with_retries(
-                texts, model_name, oai_client, max_retries, max_tokens
+                prompt_texts, model_name, oai_client, max_retries, max_tokens
             )
 
         rows: list[dict[str, Any]] = []
@@ -144,7 +153,7 @@ async def _get_topic_iterator(
         return rows
 
     async with S3DataTool().filter_for_export(
-        name="posts_clustered_002",
+        name="posts_clustered_004",
         base_columns=["text", "original_ids"],
     ) as generator:
         tasks = []
@@ -161,8 +170,9 @@ async def main():
     parser.add_argument("--model_name", required=True)
     parser.add_argument("--max_concurrency", type=int, default=16)
     parser.add_argument("--max_retries", type=int, default=6)
-    parser.add_argument("--dataset-name", default="posts_summarized_001_dry_run")
+    parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
     parser.add_argument("--max_tokens", type=int, default=1024)
+    parser.add_argument("--max-texts-per-cluster", type=int, default=32)
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d-%H")
@@ -178,6 +188,7 @@ async def main():
                 max_concurrency=args.max_concurrency,
                 max_retries=args.max_retries,
                 max_tokens=args.max_tokens,
+                max_texts_per_cluster=args.max_texts_per_cluster,
             ),
             name=args.dataset_name,
             batch=batch_name,

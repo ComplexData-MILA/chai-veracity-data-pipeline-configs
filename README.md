@@ -57,7 +57,6 @@ Cluster posts one day at a time using a kNN-graph + connected-components approac
 ```bash
 uv run --env-file .env python scripts/cluster/clustering.py \
 --limit 1 \
---k 14 \
 --drop-frac 0.9 \
 --min-cluster-size 2 \
 --outlier-threshold 0.1 \
@@ -132,7 +131,7 @@ Extract common verifiable claims from each cluster using an LLM. The script read
 sbatch slurm/slurm_summarize.sh
 
 # With optional overrides
-MAX_TOKENS=2048 DATASET_NAME=posts_summarized_002 sbatch slurm/slurm_summarize.sh
+MAX_TOKENS=2048 DATASET_NAME=posts_summarized_003 sbatch slurm/slurm_summarize.sh
 ```
 
 **Via external API** (OpenAI-compatible endpoint):

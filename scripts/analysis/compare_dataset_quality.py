@@ -48,10 +48,10 @@ DEFAULT_DATASETS = {
         "split": "test",
         "subset": "liar",
     },
-    "liar-new": {
+    "liar_new": {
         "path": "ComplexDataLab/Misinfo_Datasets",
         "split": "test",
-        "subset": "liar-new",
+        "subset": "liar_new",
     },
 }
 
@@ -145,7 +145,7 @@ def _load_datasets(
         ds = load_dataset(**kwargs)
         # DatasetDict -> pick the right split
         if hasattr(ds, "keys"):
-            split_name = cfg.get("split", list(ds.keys())[0])
+            split_name = cfg.get("split") or list(ds.keys())[0]
             ds = ds[split_name]
 
         text_col = _get_text_column(ds.column_names)
@@ -414,7 +414,7 @@ async def main():
         help="Independent judgment runs per example for t-distribution CI",
     )
     parser.add_argument(
-        "--max-concurrency", type=int, default=36,
+        "--max-concurrency", type=int, default=128,
         help="Max concurrent LLM calls",
     )
     parser.add_argument(

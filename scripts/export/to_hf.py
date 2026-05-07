@@ -30,9 +30,20 @@ EXPORT_MODES: dict[str, ExportConfig] = {
             ),
         },
     ),
+    "raw_clusters": ExportConfig(
+        name="posts_clustered_004",
+        base_columns=["id", "original_ids", "text"],
+    ),
     "clustered": ExportConfig(
-        name="posts_summarized_002_dry_run",
-        base_columns=["claim", "cluster_id", "id", "original_ids", "post_count"],
+        name="posts_summarized_003_b",
+        base_columns=[
+            "claim",
+            "cluster_id",
+            "id",
+            "original_ids",
+            "original_texts",
+            "post_count",
+        ],
         base_filter=RawDuckFilter(sql="post_count >= 2"),
     ),
 }
