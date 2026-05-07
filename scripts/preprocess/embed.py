@@ -118,16 +118,21 @@ async def main():
     )
     coordinator.start()
 
-    async with S3DataTool().filter_for_annotation(
-        name="posts",
-        annotator_name=annotator_name,
-        base_columns=["text"],
-        annotator_columns={"feasibility_classifier_001": ["label"]},
-        annotator_filters={
-            "feasibility_classifier_001": RawDuckFilter(sql="label >= 1"),
-        },
-        base_filter=RawDuckFilter(sql="length(text) > 0"),
-    ) as annotator_view:
+    async with (
+        S3DataTool().filter_for_annotation(
+            name="posts",
+            annotator_name=annotator_name,
+            base_columns=["text"],
+            annotator_columns={"feasibility_classifier_001": ["classifier_label"]},
+            annotator_filters={
+                "feasibility_classifier_001": RawDuckFilter(
+                    sql="classifier_label = '\"LABEL_1\"'",  # raw values are JSON-encoded strings: "LABEL_1"
+                ),
+            },
+            base_filter=RawDuckFilter(sql="length(text) > 0"),
+            fraction=0.1,
+        ) as annotator_view
+    ):
         await annotator_view.annotate(
             lambda item: coordinator.annotate(item),
             max_concurrency=args.max_concurrency,
