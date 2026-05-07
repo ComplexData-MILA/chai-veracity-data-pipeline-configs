@@ -121,6 +121,50 @@ uv run --env-file .env --env-file .llm.env python scripts/analysis/tune_clusteri
 
 Results are saved to `outputs/tune_clustering/results.csv` (pandas table), `results.json` (full diagnostics), and per-threshold heatmaps (`coherence_heatmap_thr000.png`, `cluster_count_heatmap_thr000.png`, etc.).
 
+## Summarize Clusters with LLM
+
+Extract common verifiable claims from each cluster using an LLM. The script reads clustered posts from S3 (`posts_clustered_002`), sends batches to the LLM, and writes summarized claims back to S3.
+
+```bash
+# Via SLURM (launches a local vLLM server with Qwen3.5-9B)
+sbatch slurm/slurm_summarize.sh
+
+# With optional overrides
+MAX_TOKENS=2048 DATASET_NAME=posts_summarized_002 sbatch slurm/slurm_summarize.sh
+```
+
+**Via external API** (OpenAI-compatible endpoint):
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export OPENAI_API_KEY="EMPTY"
+export MODEL_NAME=Qwen/Qwen3.5-9B
+
+uv run scripts/cluster/summarize.py \
+    --model_name $MODEL_NAME \
+    --max_concurrency 36 \
+    --max_tokens 1024 \
+    --dataset-name posts_summarized_001
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model_name` | (required) | OpenAI-compatible model name |
+| `--max_concurrency` | `16` | Max concurrent LLM API calls |
+| `--max_retries` | `6` | Retries per cluster on API failure |
+| `--max_tokens` | `1024` | Max completion tokens per LLM call; caps output to prevent loops |
+| `--dataset-name` | `posts_summarized_001_dry_run` | Target dataset name in S3 |
+
+**Test prompt template locally** (uses a real S3 sample, prints LLM output without writing back):
+
+```bash
+uv run python scripts/cluster/test_summarize.py
+```
+
+Uses secrets from `.env` and `.llm-test.env`.
+
 ## Distill Annotations into Classifier
 
 Set up the training virtual environment (one-time):

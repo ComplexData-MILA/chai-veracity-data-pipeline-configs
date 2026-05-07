@@ -68,7 +68,8 @@ async def _generate(
     response = await oai_client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     output = response.choices[0].message.content
     assert output is not None

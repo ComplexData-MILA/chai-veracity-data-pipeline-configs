@@ -54,7 +54,8 @@ async def main():
             response = await client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
+                max_completion_tokens=1024,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             raw = response.choices[0].message.content or "(empty)"
 

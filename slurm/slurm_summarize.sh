@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cdl-annotation
-#SBATCH --output=logs/feasibility_%j.out
-#SBATCH --error=logs/feasibility_%j.err
+#SBATCH --job-name=cdl-summarize
+#SBATCH --output=logs/summarize_%j.out
+#SBATCH --error=logs/summarize_%j.err
 
 #SBATCH -c 8
 #SBATCH --gres=gpu:ampere:1
@@ -11,7 +11,7 @@
 set -e
 
 export PROJECT_HOME=$HOME/20260331-chai-veracity
-export MODEL_NAME=Qwen/Qwen3.5-9B
+export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-9B}"
 
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
@@ -76,22 +76,21 @@ source $PROJECT_HOME/.env
 export OPENAI_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1
 export OPENAI_API_KEY="EMPTY"
 
-# Launch long-running scripts in parallel (add more as needed)
-BG_PIDS=()
+# Pass through optional overrides from environment
+MAX_TOKENS="${MAX_TOKENS:-1024}"
+DATASET_NAME="${DATASET_NAME:-posts_summarized_001}"
 
-uv run scripts/filter/feasibility.py \
+uv run scripts/cluster/summarize.py \
     --model_name $MODEL_NAME \
-    --max_concurrency 36 &
-BG_PIDS+=($!)
+    --max_concurrency 36 \
+    --max_tokens $MAX_TOKENS \
+    --dataset-name $DATASET_NAME
 
-# Wait for all non-server background jobs
-FAILED=0
-for pid in "${BG_PIDS[@]}"; do
-    wait "$pid" || FAILED=1
-done
+EXIT_CODE=$?
 
-# Stop the vLLM server now that all scripts are done
+# Stop the vLLM server
 kill $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
 
-exit $FAILED
+echo "Job finished with exit code $EXIT_CODE"
+exit $EXIT_CODE
