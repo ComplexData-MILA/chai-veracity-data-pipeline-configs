@@ -22,7 +22,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import openai
 import pandas as pd
+import pyarrow.parquet as pq
 from datasets import load_dataset
+from datasets.exceptions import DatasetGenerationError
+from huggingface_hub import hf_hub_download, list_repo_files
 from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,11 @@ def _get_text_column(columns: list[str]) -> str | None:
         if candidate in columns:
             return candidate
     return None
+
+
+def _sanitize_dirname(name: str) -> str:
+    """Convert a dataset name to a safe directory name."""
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_")
 
 
 def _parse_verdict(output: str) -> tuple[str, int]:
@@ -125,6 +133,43 @@ def _mean_ci(values: list[float]) -> tuple[float, float, float, float, float]:
     return mean, std, sem, ci_low, ci_high
 
 
+def _load_parquet_fallback(
+    path: str, subset: str | None, split: str | None
+) -> list[dict]:
+    """Load a HF dataset by reading parquet files directly, bypassing schema checks."""
+    all_files = list_repo_files(path, repo_type="dataset")
+    parquet_files = [f for f in all_files if f.endswith(".parquet")]
+    logger.info("  Found %d parquet files on HF Hub", len(parquet_files))
+
+    # Filter by subset/config directory
+    if subset:
+        prefix = f"data/{subset}/"
+        parquet_files = [f for f in parquet_files if f.startswith(prefix)]
+        if not parquet_files:
+            prefix = f"{subset}/"
+            parquet_files = [f for f in parquet_files if f.startswith(prefix)]
+
+    # Filter by split in filename
+    if split:
+        parquet_files = [
+            f for f in parquet_files
+            if f"{split}-" in os.path.basename(f)
+        ]
+
+    if not parquet_files:
+        raise ValueError(
+            f"No parquet files found for {path} subset={subset} split={split}"
+        )
+
+    rows: list[dict] = []
+    for pf in parquet_files:
+        local = hf_hub_download(path, pf, repo_type="dataset")
+        table = pq.read_table(local)
+        for i in range(len(table)):
+            rows.append({col: table[col][i].as_py() for col in table.column_names})
+    return rows
+
+
 def _load_datasets(
     configs: dict, n_samples: int, seed: int
 ) -> dict[str, list[str]]:
@@ -142,7 +187,25 @@ def _load_datasets(
         if cfg.get("split"):
             kwargs["split"] = cfg["split"]
 
-        ds = load_dataset(**kwargs)
+        try:
+            ds = load_dataset(**kwargs)
+        except DatasetGenerationError:
+            logger.warning(
+                "  load_dataset failed (schema mismatch), falling back to parquet..."
+            )
+            rows = _load_parquet_fallback(
+                cfg["path"], cfg.get("subset"), cfg.get("split"),
+            )
+            text_col = _get_text_column(list(rows[0].keys()) if rows else [])
+            if text_col is None:
+                raise ValueError(
+                    f"Could not find text column in fallback for {name}. "
+                    f"Available columns: {list(rows[0].keys()) if rows else []}"
+                )
+            texts = [row[text_col] for row in rows]
+            _subsample_and_store(name, texts, n_samples, seed, dataset_texts)
+            continue
+
         # DatasetDict -> pick the right split
         if hasattr(ds, "keys"):
             split_name = cfg.get("split") or list(ds.keys())[0]
@@ -156,18 +219,28 @@ def _load_datasets(
             )
         logger.info("  Text column: '%s' (%d total examples)", text_col, len(ds))
 
-        n_total = len(ds)
-        if n_total > n_samples:
-            rng = np.random.RandomState(seed)
-            indices = rng.choice(n_total, size=n_samples, replace=False)
-            texts = [ds[int(i)][text_col] for i in indices]
-        else:
-            texts = [row[text_col] for row in ds]
-
-        dataset_texts[name] = texts
-        logger.info("  Subsampled %d examples", len(texts))
+        texts = [row[text_col] for row in ds]
+        _subsample_and_store(name, texts, n_samples, seed, dataset_texts)
 
     return dataset_texts
+
+
+def _subsample_and_store(
+    name: str,
+    texts: list[str],
+    n_samples: int,
+    seed: int,
+    dataset_texts: dict[str, list[str]],
+) -> None:
+    n_total = len(texts)
+    if n_total > n_samples:
+        rng = np.random.RandomState(seed)
+        indices = rng.choice(n_total, size=n_samples, replace=False)
+        selected = [texts[int(i)] for i in indices]
+    else:
+        selected = texts
+    dataset_texts[name] = selected
+    logger.info("  Subsampled %d examples (from %d total)", len(selected), n_total)
 
 
 async def _judge_dataset(
@@ -352,6 +425,9 @@ def _plot(results: list[dict], output_dir: Path, n_judge_runs: int) -> None:
     plot_path = output_dir / "feasibility_comparison.png"
     fig.savefig(plot_path, dpi=150)
     logger.info("Saved plot to %s", plot_path)
+    pdf_path = output_dir / "feasibility_comparison.pdf"
+    fig.savefig(pdf_path, bbox_inches="tight")
+    logger.info("Saved PDF to %s", pdf_path)
     plt.close(fig)
 
 
@@ -429,18 +505,46 @@ async def main():
         "--datasets", default=None,
         help="Path to JSON file with custom dataset configs",
     )
+    parser.add_argument(
+        "--dataset-name", default=None,
+        help="Single-dataset mode: display name for the dataset",
+    )
+    parser.add_argument(
+        "--dataset-path", default=None,
+        help="Single-dataset mode: HF Hub path (e.g. ComplexDataLab/chai-veracity)",
+    )
+    parser.add_argument(
+        "--dataset-subset", default=None,
+        help="Single-dataset mode: optional subset/config name",
+    )
+    parser.add_argument(
+        "--dataset-split", default=None,
+        help="Single-dataset mode: optional split name",
+    )
     args = parser.parse_args()
 
     model_name = args.model_name or os.environ["MODEL_NAME"]
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Dataset configs
-    if args.datasets:
+    if args.dataset_path:
+        dataset_name = args.dataset_name or args.dataset_path
+        datasets_config = {
+            dataset_name: {
+                "path": args.dataset_path,
+                "subset": args.dataset_subset,
+                "split": args.dataset_split,
+            }
+        }
+        output_dir = Path(args.output_dir) / _sanitize_dirname(dataset_name)
+    elif args.datasets:
         with open(args.datasets) as f:
             datasets_config = json.load(f)
+        output_dir = Path(args.output_dir)
     else:
         datasets_config = DEFAULT_DATASETS
+        output_dir = Path(args.output_dir)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load datasets
     dataset_texts = _load_datasets(datasets_config, args.n_samples, args.seed)

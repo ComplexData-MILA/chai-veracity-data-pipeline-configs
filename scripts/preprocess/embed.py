@@ -104,10 +104,22 @@ async def main():
         default=1.0,
         help="Seconds to wait before flushing an incomplete batch.",
     )
+    parser.add_argument(
+        "--batch",
+        default=None,
+        help="Process only this specific batch name (sets fraction=1.0).",
+    )
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        help="Override the fraction of rows to annotate (default: 0.05 normally, 1.0 when --batch is set).",
+    )
     args = parser.parse_args()
     oai_client = openai.AsyncOpenAI()
 
     annotator_name = f"embeddings_{args.dimensions}d"
+    fraction = args.fraction if args.fraction is not None else (1.0 if args.batch else 0.05)
 
     coordinator = EmbeddingBatchCoordinator(
         oai_client=oai_client,
@@ -129,13 +141,14 @@ async def main():
                     sql="classifier_label = '\"LABEL_1\"'",  # raw values are JSON-encoded strings: "LABEL_1"
                 ),
             },
-            fraction=0.05,
+            fraction=fraction,
         ) as annotator_view
     ):
         await annotator_view.annotate(
             lambda item: coordinator.annotate(item),
             max_concurrency=args.max_concurrency,
             streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
+            batches=[args.batch] if args.batch else None,
         )
 
     await coordinator.close()

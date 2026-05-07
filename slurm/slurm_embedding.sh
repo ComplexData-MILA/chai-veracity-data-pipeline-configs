@@ -87,6 +87,8 @@ ANNOTATION_CMD="uv run -m scripts.preprocess.embed --model_name $MODEL_NAME --ma
 if [ -n "$EMBEDDING_DIMENSIONS" ]; then
     ANNOTATION_CMD="$ANNOTATION_CMD --dimensions $EMBEDDING_DIMENSIONS"
 fi
+# Only process the x-posts batch
+ANNOTATION_CMD="$ANNOTATION_CMD --batch x-posts-20260507-06 --fraction 1.0"
 
 echo "Starting embedding annotation..."
 eval $ANNOTATION_CMD

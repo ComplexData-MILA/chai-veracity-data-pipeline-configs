@@ -557,6 +557,7 @@ async def _process_day(
     max_cluster_size: int = 0,
     split_k_scale: float = 0.5,
     outlier_threshold: float = 0.0,
+    output_batch_name: str | None = None,
 ) -> list[list[DataItem]]:
     """Collect, cluster, and upload one day's worth of data."""
     logger.info(
@@ -584,7 +585,7 @@ async def _process_day(
     for i, cluster in enumerate(clusters):
         logger.info("Day %s cluster %d: %d items", day, i, len(cluster))
 
-    batch_name = f"bsky-trending-{day}"
+    batch_name = output_batch_name or f"bsky-trending-{day}"
     async with S3DataTool().dataset_generator() as dataset_generator:
         await dataset_generator.from_async_iterator(
             _get_cluster_iterator(clusters),
@@ -612,7 +613,24 @@ async def main() -> list[list]:
                         help="Scale factor for k when sub-clustering (default: 0.5)")
     parser.add_argument("--outlier-threshold", type=float, default=0.0,
                         help="Cosine similarity floor for small-cluster merging (default: 0.0 = disabled)")
+    parser.add_argument("--batch", default=None,
+                        help="Process only this specific batch name (overrides --limit).")
     args = parser.parse_args()
+
+    if args.batch:
+        m = _DAY_RE.search(args.batch)
+        day = m.group(1) if m else "unknown"
+        output_batch_name = f"x-posts-clusters-{day}"
+        all_clusters = await _process_day(
+            day, [args.batch], args.dataset_name,
+            k=args.k, drop_frac=args.drop_frac,
+            min_cluster_size=args.min_cluster_size,
+            max_cluster_size=args.max_cluster_size,
+            split_k_scale=args.split_k_scale,
+            outlier_threshold=args.outlier_threshold,
+            output_batch_name=output_batch_name,
+        )
+        return all_clusters
 
     all_batches = await _list_batches()
     days = _group_batches_by_day(all_batches)

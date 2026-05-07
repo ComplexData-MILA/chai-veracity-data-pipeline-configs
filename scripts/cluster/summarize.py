@@ -102,6 +102,8 @@ async def _get_topic_iterator(
     max_retries: int,
     max_tokens: int,
     max_texts_per_cluster: int,
+    batch_filter: str | None = None,
+    input_dataset: str = "posts_clustered_004",
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream clusters, summarize each, yield one row per topic."""
     sem = asyncio.Semaphore(max_concurrency)
@@ -153,11 +155,13 @@ async def _get_topic_iterator(
         return rows
 
     async with S3DataTool().filter_for_export(
-        name="posts_clustered_004",
+        name=input_dataset,
         base_columns=["text", "original_ids"],
     ) as generator:
         tasks = []
         async for item in generator:
+            if batch_filter and item.batch != batch_filter:
+                continue
             tasks.append(asyncio.create_task(_process(item)))
 
         for task in asyncio.as_completed(tasks):
@@ -173,6 +177,10 @@ async def main():
     parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--max-texts-per-cluster", type=int, default=32)
+    parser.add_argument("--batch", default=None,
+                        help="Summarize only clusters from this batch name (e.g. x-posts-clusters-20260507).")
+    parser.add_argument("--input-dataset", default="posts_clustered_004",
+                        help="Dataset to read clusters from (default: posts_clustered_004).")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d-%H")
@@ -189,6 +197,8 @@ async def main():
                 max_retries=args.max_retries,
                 max_tokens=args.max_tokens,
                 max_texts_per_cluster=args.max_texts_per_cluster,
+                batch_filter=args.batch,
+                input_dataset=args.input_dataset,
             ),
             name=args.dataset_name,
             batch=batch_name,

@@ -299,3 +299,97 @@ uv run python scripts/analysis/evaluation_llm_judge.py \
     --api_key $OPENAI_API_KEY \
     --max_concurrency 32
 ```
+## Fact-Check Evaluation
+
+Evaluate how well LLMs fact-check claims with vs. without web search access. Compares a no-search LLM (internal knowledge only) against pseudo-labels from web-search-equipped agents and ground truth labels from benchmark datasets.
+
+Two search backends are available:
+- **OpenAI web search** (`WebSearchTool`) — original pseudo-label source
+- **Brave Search API** (custom `FunctionTool`) — alternative search backend, with optional date-range staleness
+
+### Original Evaluation (OpenAI Web Search)
+
+```bash
+source .oai.env && \
+uv run python scripts/analysis/fact_check_eval.py \
+--n-samples 25 --n-agent-runs 5 --n-judge-runs 5 --max-concurrency 16 \
+--agent-model-name gpt-5-mini --judge-model-name gpt-5-nano
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--n-samples` | `25` | Examples to subsample per dataset |
+| `--n-agent-runs` | `5` | Web-search agent runs per example (for majority-vote pseudo-label) |
+| `--n-judge-runs` | `5` | No-search LLM runs per example (for t-distribution CI) |
+| `--max-concurrency` | `16` | Max concurrent LLM calls |
+| `--model-name` | `$MODEL_NAME` | OpenAI model for both agent and judge |
+| `--agent-model-name` | (same as `--model-name`) | Model for web-search agent (must support `web_search_preview`) |
+| `--judge-model-name` | (same as `--model-name`) | Model for no-search judge |
+| `--output-dir` | `outputs/fact_check_eval` | Output directory |
+| `--seed` | `42` | Random seed for subsampling |
+| `--datasets` | (built-in defaults) | Path to JSON file with custom dataset configs |
+
+Outputs: `results.csv`, `results.json`, `agreement.json`, `fact_check_accuracy.png/pdf`, and per-example reasoning traces under `raw/`.
+
+### Brave Search Baseline (with Staleness Axis)
+
+Adds two Brave Search variants to the existing evaluation without re-running completed experiments:
+
+- **Brave-full** (no freshness filter): pseudo-label generator, equivalent to OpenAI web search
+- **Brave-stale** (`freshness=2020-01-01` to two weeks before today): judge evaluated against Brave-full pseudo-labels
+
+```bash
+source .brave.env && source .oai.env && \
+uv run python scripts/analysis/fact_check_brave_eval.py \
+    --n-samples 25 --n-agent-runs 5 --n-judge-runs 5 --max-concurrency 16 \
+    --agent-model-name gpt-5-mini
+```
+
+Requires `BRAVE_SEARCH_API_KEY` set in `.brave.env` (subscription token from [Brave Search API](https://api-dashboard.search.brave.com)).
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--n-samples` | `25` | Examples per dataset (must match the original run's seed for consistent subsampling) |
+| `--n-agent-runs` | `5` | Brave agent runs per example (both full and stale) |
+| `--n-judge-runs` | `5` | Runs per example in existing no-search raw data (auto-detected if omitted) |
+| `--max-concurrency` | `16` | Max concurrent LLM calls |
+| `--agent-model-name` | `gpt-5-mini` | Model for Brave search agent calls |
+| `--output-dir` | `outputs/fact_check_eval` | Output directory (merges with existing results) |
+| `--existing-results` | `outputs/fact_check_eval/results.json` | Path to existing results for merging |
+| `--seed` | `42` | Random seed for subsampling |
+| `--datasets` | (built-in defaults) | Path to JSON file with custom dataset configs |
+
+**Evaluation Matrix:**
+
+| Judge | vs. Pseudo-label | vs. Ground Truth |
+|---|---|---|
+| No-search LLM | OpenAI pseudo + Brave pseudo | Ground truth |
+| Brave-stale LLM | Brave pseudo | Ground truth |
+
+A secondary chart (`fact_check_accuracy_brave_vs_oai.png`) shows Brave-stale accuracy vs. OpenAI pseudo-labels for reviewer reference.
+
+**Outputs:** Merged `results.csv`, `results.json`, `agreement.json`, main chart with all bar groups (`fact_check_accuracy.png/pdf`), secondary chart (`fact_check_accuracy_brave_vs_oai.png/pdf`), and per-example Brave reasoning traces under `raw/<dataset>_brave_full/` and `raw/<dataset>_brave_stale/`. Existing `raw/<dataset>_search/` and `raw/<dataset>_nosearch/` directories are untouched.
+
+### End-to-End Test
+
+Quick verification on 5 examples with 3 runs each:
+
+```bash
+# Original OpenAI web-search eval
+source .oai.env && \
+uv run python scripts/analysis/fact_check_eval.py \
+    --n-samples 5 --n-agent-runs 3 --n-judge-runs 3 --max-concurrency 4 \
+    --agent-model-name gpt-5-mini --judge-model-name gpt-5-nano \
+    --output-dir outputs/fact_check_eval_test
+
+# Brave search baseline
+source .brave.env && source .oai.env && \
+uv run python scripts/analysis/fact_check_brave_eval.py \
+    --n-samples 5 --n-agent-runs 3 --n-judge-runs 3 --max-concurrency 4 \
+    --agent-model-name gpt-5-mini \
+    --existing-results outputs/fact_check_eval/results.json
+```

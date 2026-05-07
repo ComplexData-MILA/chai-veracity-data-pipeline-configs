@@ -83,7 +83,20 @@ async def main():
         default=1.0,
         help="Seconds to wait before flushing an incomplete batch.",
     )
+    parser.add_argument(
+        "--batch",
+        default=None,
+        help="Process only this specific batch name (sets fraction=1.0).",
+    )
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=None,
+        help="Override the fraction of rows to annotate (default: 0.01 normally, 1.0 when --batch is set).",
+    )
     args = parser.parse_args()
+
+    fraction = args.fraction if args.fraction is not None else (1.0 if args.batch else 0.01)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         coordinator = ClassifierBatchCoordinator(
@@ -99,12 +112,13 @@ async def main():
             name="posts",
             annotator_name="feasibility_classifier_001",
             base_columns=["text"],
-            fraction=0.01,
+            fraction=fraction,
         ) as annotator_view:
             await annotator_view.annotate(
                 lambda item: coordinator.annotate(item),
                 max_concurrency=args.max_concurrency,
                 streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
+                batches=[args.batch] if args.batch else None,
             )
 
         await coordinator.close()
