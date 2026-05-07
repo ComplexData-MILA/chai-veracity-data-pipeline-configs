@@ -13,10 +13,33 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.cluster.vq import kmeans2
 
+from pydantic import BaseModel
+
 from s3_data_tool import S3DataTool, DataItem, RawDuckFilter
 from s3_data_tool.s3_utils import enumerate_batches  # not in __all__; import from submodule
 
 logger = logging.getLogger(__name__)
+
+
+class SmallClusterInfo(BaseModel):
+    """Diagnostic info for one small cluster considered for merging."""
+    size: int
+    max_sim: float
+    nearest_large_size: int
+    row_indices: list[int] = []
+
+    class Config:
+        # Exclude row_indices from serialization by default — it can be large
+        pass
+
+
+class ClusterDiagnostics(BaseModel):
+    """Diagnostics returned by cluster_knn_graph_with_diagnostics."""
+    n_initial: int
+    n_after_split: int
+    n_after_merge: int
+    total_items: int
+    small_clusters: list[SmallClusterInfo]
 
 
 def _decode_embeddings(encoded: str) -> np.ndarray:
@@ -237,25 +260,29 @@ def _merge_undersized_clusters(
     labels: np.ndarray,         # (n,) int
     min_size: int,
     outlier_threshold: float,   # cosine similarity below which small clusters are dropped
-) -> tuple[np.ndarray, set]:   # (new_labels, outlier_label_indices)
+) -> tuple[np.ndarray, set, list[dict]]:   # (new_labels, outlier_label_indices, small_cluster_sims)
     """Merge clusters below *min_size* into nearest larger cluster.
 
     If *outlier_threshold* > 0, a small cluster whose maximum cosine similarity
     to any large cluster falls below the threshold is marked as an outlier
     (its label appears in the returned outlier set) instead of being merged.
+
+    The third return value is a list of dicts describing each small cluster:
+        {"size": int, "max_sim": float, "nearest_large_size": int}
+    This data is used by diagnostic tooling to select an outlier_threshold.
     """
     unique_labels, compressed = np.unique(labels, return_inverse=True)
     n = len(unique_labels)
 
     if n <= 1:
-        return labels, set()
+        return labels, set(), []
 
     sizes = np.bincount(compressed, minlength=n)
     small = np.where(sizes < min_size)[0]
     large = np.where(sizes >= min_size)[0]
 
     if len(small) == 0:
-        return labels, set()
+        return labels, set(), []
 
     if len(large) == 0:
         if outlier_threshold > 0:
@@ -276,12 +303,20 @@ def _merge_undersized_clusters(
             keep_compressed = keep_mask[compressed]
             new_compressed = compressed[keep_compressed]
             new_unique, new_inverse = np.unique(new_compressed, return_inverse=True)
-            return new_inverse.astype(np.int32), outliers
+            sim_data = [{"size": int(sizes[i]), "max_sim": float(max_sim[i]),
+                         "nearest_large_size": 0,
+                         "row_indices": np.flatnonzero(compressed == i).tolist()}
+                        for i in range(n)]
+            return new_inverse.astype(np.int32), outliers, sim_data
         else:
             logger.warning(
                 "All %d clusters are below min_cluster_size=%d; skipping merge.", n, min_size,
             )
-            return labels, set()
+            sim_data = [{"size": int(sizes[i]), "max_sim": 0.0,
+                         "nearest_large_size": 0,
+                         "row_indices": np.flatnonzero(compressed == i).tolist()}
+                        for i in range(n)]
+            return labels, set(), sim_data
 
     centroids = _compute_centroids(matrix, compressed, n)
     small_c = centroids[small]
@@ -314,10 +349,18 @@ def _merge_undersized_clusters(
             "Dropped %d items in %d outlier clusters (threshold=%.2f)",
             outlier_mask.sum(), len(outlier_labels), outlier_threshold,
         )
-        return result.astype(np.int32), outlier_labels
+        sim_data = [{"size": int(sizes[s]), "max_sim": float(best_sim[i]),
+                     "nearest_large_size": int(sizes[best_large_idx[i]]),
+                     "row_indices": np.flatnonzero(compressed == s).tolist()}
+                    for i, s in enumerate(small)]
+        return result.astype(np.int32), outlier_labels, sim_data
     else:
         _, result = np.unique(new_compressed, return_inverse=True)
-        return result.astype(np.int32), set()
+        sim_data = [{"size": int(sizes[s]), "max_sim": float(best_sim[i]),
+                     "nearest_large_size": int(sizes[best_large_idx[i]]),
+                     "row_indices": np.flatnonzero(compressed == s).tolist()}
+                    for i, s in enumerate(small)]
+        return result.astype(np.int32), set(), sim_data
 
 
 def cluster_knn_graph(
@@ -384,7 +427,7 @@ def cluster_knn_graph(
 
     outlier_labels: set[int] = set()
     if min_cluster_size > 0:
-        labels, outlier_labels = _merge_undersized_clusters(
+        labels, outlier_labels, _small_cluster_sims = _merge_undersized_clusters(
             matrix, labels, min_cluster_size, outlier_threshold,
         )
         logger.info("After merge: %d labels", len(np.unique(labels)))
@@ -405,6 +448,82 @@ def cluster_knn_graph(
         )
 
     return clusters
+
+
+def cluster_knn_graph_with_diagnostics(
+    rows: list,
+    embeddings: list[np.ndarray],
+    k: int | None = None,
+    drop_frac: float = 0.9,
+    min_cluster_size: int = 0,
+    max_cluster_size: int = 0,
+    split_k_scale: float = 0.5,
+    outlier_threshold: float = 0.0,
+) -> tuple[list[list[DataItem]], ClusterDiagnostics]:
+    """Same as cluster_knn_graph but returns per-cluster diagnostic info.
+
+    The diagnostics payload includes similarity scores for every small cluster
+    (those below *min_cluster_size*), enabling threshold selection without
+    re-running clustering.
+
+    Returns:
+        (clusters, diagnostics) — clusters are the same as cluster_knn_graph;
+        diagnostics carries ClusterDiagnostics with per-small-cluster similarity
+        data, cluster counts, and total item count.
+    """
+    if not rows:
+        return [], ClusterDiagnostics(
+            n_initial=0, n_after_split=0, n_after_merge=0, total_items=0, small_clusters=[],
+        )
+
+    n = len(rows)
+
+    if k is None:
+        k = math.ceil(math.log2(n))
+        logger.info(f"Auto-selected k={k} for n={n} embeddings")
+
+    matrix = np.stack(embeddings).astype(np.float32)
+    graph = _build_knn_graph(matrix, k=k, drop_frac=drop_frac)
+
+    n_clusters, labels = connected_components(graph, directed=False)
+    logger.info(f"Initial: {n_clusters} clusters (k={k}, n={n})")
+
+    # Split
+    n_after_split = n_clusters
+    if max_cluster_size > 0:
+        labels = _split_overlarge_clusters(
+            matrix, labels, max_cluster_size, k, drop_frac, split_k_scale,
+        )
+        n_after_split = len(np.unique(labels))
+        logger.info("After split: %d labels", n_after_split)
+
+    # Merge — capture similarity data
+    small_cluster_sims: list[dict] = []
+    n_after_merge = n_after_split
+    if min_cluster_size > 0:
+        labels, _outlier_labels, small_cluster_sims = _merge_undersized_clusters(
+            matrix, labels, min_cluster_size, outlier_threshold,
+        )
+        n_after_merge = len(np.unique(labels))
+        logger.info("After merge: %d labels", n_after_merge)
+
+    # Rebuild cluster lists
+    unique_labels, inverse = np.unique(labels, return_inverse=True)
+    clusters: list[list] = [[] for _ in range(len(unique_labels))]
+    for row, label_idx in zip(rows, inverse):
+        clusters[label_idx].append(row)
+
+    clusters.sort(key=len, reverse=True)
+
+    diagnostics = ClusterDiagnostics(
+        n_initial=n_clusters,
+        n_after_split=n_after_split,
+        n_after_merge=n_after_merge,
+        total_items=n,
+        small_clusters=[SmallClusterInfo(**sim) for sim in small_cluster_sims],
+    )
+
+    return clusters, diagnostics
 
 
 async def _get_cluster_iterator(
@@ -471,7 +590,7 @@ async def _process_day(
             _get_cluster_iterator(clusters),
             name=dataset_name,
             batch=batch_name,
-            streaming_configs=S3DataTool.StreamingConfigs(chunk_size=1),
+            streaming_configs=S3DataTool.StreamingConfigs(chunk_size=100),
             deduplicate_on=["text", "source_id"],
         )
 

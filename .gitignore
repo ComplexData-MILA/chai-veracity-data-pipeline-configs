@@ -12,6 +12,7 @@ uv.lock
 
 # Secrets
 .env
+*.env
 
 # SLURM log files
 /logs
