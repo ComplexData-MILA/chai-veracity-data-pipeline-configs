@@ -222,6 +222,9 @@ def _plot_heatmap(
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     logger.info("Saved heatmap to %s", output_path)
+    pdf_path = output_path.with_suffix(".pdf")
+    fig.savefig(pdf_path)
+    logger.info("Saved heatmap to %s", pdf_path)
     plt.close(fig)
 
 

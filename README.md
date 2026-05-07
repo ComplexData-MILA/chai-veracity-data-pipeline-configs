@@ -58,7 +58,9 @@ Cluster posts one day at a time using a kNN-graph + connected-components approac
 uv run --env-file .env python scripts/cluster/clustering.py \
 --limit 1 \
 --k 14 \
---drop-frac 0.95 \
+--drop-frac 0.9 \
+--min-cluster-size 2 \
+--outlier-threshold 0.1 \
 --dataset-name posts_clustered_001
 ```
 

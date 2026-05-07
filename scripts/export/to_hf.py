@@ -30,6 +30,11 @@ EXPORT_MODES: dict[str, ExportConfig] = {
             ),
         },
     ),
+    "clustered": ExportConfig(
+        name="posts_summarized_002_dry_run",
+        base_columns=["claim", "cluster_id", "id", "original_ids", "post_count"],
+        base_filter=RawDuckFilter(sql="post_count >= 2"),
+    ),
 }
 
 
@@ -67,7 +72,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        default="classifier_hits",
+        default="clustered",
         choices=list(EXPORT_MODES.keys()),
         help="Export mode selecting which dataset/columns/filters to use. "
         f"Available: {', '.join(EXPORT_MODES)}.",

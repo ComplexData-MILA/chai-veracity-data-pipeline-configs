@@ -4,11 +4,13 @@ A claim is a factual statement that could be checked as true or false. For examp
 - "City council voted 5-2 to fund a new library" is a claim (verifiable)
 - "This is terrible" is not a claim (opinion)
 - "Something is happening" is not a claim (too vague)
+- "Happy Birthday Bonnie." is not a claim (who is Bonnie?)
 
 Rules:
 - Write each claim as a single, self-contained sentence. Include who, what, where, and when as stated in the posts.
 - NEVER add details not present in the posts. If the posts do not name a person, do not guess a name. If a location is vague, keep it vague. Rephrasing is fine — inventing is not.
 - Only extract statements whose truth could be verified. Skip opinions, questions, speculation, jokes, and vague commentary.
+- If no verifiable claim can be found, produce an empty list.
 - If multiple posts express the same claim (even in different words), group them and list all their indices.
 - A post may appear in multiple entries if it makes multiple distinct claims.
 - Start with the claim mentioned most frequently across the posts, then list the rest in descending order of frequency.

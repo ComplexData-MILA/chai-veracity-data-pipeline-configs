@@ -105,11 +105,16 @@ async def _get_topic_iterator(
     """Stream clusters, summarize each, yield one row per topic."""
     sem = asyncio.Semaphore(max_concurrency)
 
+    _DATE_RE = re.compile(r"(\d{8})")
+
     async def _process(item: DataItem) -> list[dict[str, Any]]:
         texts = item.data.get("text", [])
         original_ids = item.data.get("original_ids", [])
         if not texts:
             return []
+
+        date_match = _DATE_RE.search(item.batch)
+        date_str = date_match.group(1) if date_match else ""
 
         async with sem:
             result = await _summarize_with_retries(
@@ -123,11 +128,18 @@ async def _get_topic_iterator(
                 for i in claim.post_indices
                 if i < len(original_ids)
             ]
+            claim_texts = [
+                texts[i]
+                for i in claim.post_indices
+                if i < len(texts)
+            ]
             rows.append({
                 "cluster_id": item.id,
                 "claim": claim.claim,
                 "post_count": len(claim_ids),
                 "original_ids": claim_ids,
+                "original_texts": claim_texts,
+                "date": date_str,
             })
         return rows
 
