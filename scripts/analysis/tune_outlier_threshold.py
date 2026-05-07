@@ -24,6 +24,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import openai
 
@@ -224,6 +225,7 @@ async def _llm_evaluate(
     model_name: str,
     max_concurrency: int,
     sample_size: int,
+    output_dir: Path,
 ) -> dict[float, dict]:
     """LLM-judge clusters near each threshold boundary and report noise rates."""
     template = _load_template()
@@ -285,7 +287,65 @@ async def _llm_evaluate(
         )
 
     print()
+
+    results_path = output_dir / "llm_judge_results.json"
+    serializable = {str(t): v for t, v in results.items()}
+    with open(results_path, "w") as f:
+        json.dump(serializable, f, indent=2)
+    logger.info("Saved LLM judge results to %s", results_path)
+
     return results
+
+
+def _plot_llm_results(
+    results: dict[float, dict],
+    output_dir: Path,
+) -> None:
+    thresholds = sorted(results.keys())
+    labels = [f"{t:.2f}" for t in thresholds]
+    noise_pcts = [results[t]["noise_pct"] for t in thresholds]
+    n_noises = [results[t]["n_noise"] for t in thresholds]
+    n_sampleds = [results[t]["sampled"] for t in thresholds]
+    n_dropped = [results[t]["n_dropped_items"] for t in thresholds]
+    est_fps = [results[t]["est_fp_items"] for t in thresholds]
+
+    x = np.arange(len(thresholds))
+    width = 0.5
+
+    # Chart A: Noise rate
+    fig_a, ax_a = plt.subplots(figsize=(8, 5))
+    bars = ax_a.bar(x, noise_pcts, width, color="steelblue")
+    ax_a.set_xticks(x)
+    ax_a.set_xticklabels(labels)
+    ax_a.set_xlabel("Outlier Threshold")
+    ax_a.set_ylabel("Noise Rate (%)")
+    ax_a.set_title("LLM Judge: Noise Rate by Threshold")
+    ax_a.set_ylim(0, max(noise_pcts) * 1.25 if noise_pcts and max(noise_pcts) > 0 else 100)
+    for bar, n_noise, n_sampled in zip(bars, n_noises, n_sampleds):
+        ax_a.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+            f"{n_noise}/{n_sampled}", ha="center", va="bottom", fontsize=9,
+        )
+    fig_a.tight_layout()
+    fig_a.savefig(output_dir / "llm_noise_rate.png", dpi=150)
+    logger.info("Saved noise rate chart to %s", output_dir / "llm_noise_rate.png")
+    plt.close(fig_a)
+
+    # Chart B: Dropped items impact
+    fig_b, ax_b = plt.subplots(figsize=(8, 5))
+    bar_width = 0.35
+    ax_b.bar(x - bar_width / 2, n_dropped, bar_width, color="darkorange", label="Total dropped items")
+    ax_b.bar(x + bar_width / 2, est_fps, bar_width, color="crimson", label="Est. false positives (coherent dropped)")
+    ax_b.set_xticks(x)
+    ax_b.set_xticklabels(labels)
+    ax_b.set_xlabel("Outlier Threshold")
+    ax_b.set_ylabel("Number of Items")
+    ax_b.set_title("Impact of Threshold on Dropped Items")
+    ax_b.legend(fontsize=9)
+    fig_b.tight_layout()
+    fig_b.savefig(output_dir / "llm_false_positive_impact.png", dpi=150)
+    logger.info("Saved false positive impact chart to %s", output_dir / "llm_false_positive_impact.png")
+    plt.close(fig_b)
 
 
 async def main() -> None:
@@ -333,10 +393,12 @@ async def main() -> None:
 
     if args.mode in ("llm", "full"):
         model_name = args.model_name or os.environ.get("MODEL_NAME", "gpt-4.1")
-        await _llm_evaluate(
+        results = await _llm_evaluate(
             candidates, diagnostics, thresholds,
             model_name, args.max_concurrency, args.sample_size,
+            output_dir,
         )
+        _plot_llm_results(results, output_dir)
 
 
 if __name__ == "__main__":
