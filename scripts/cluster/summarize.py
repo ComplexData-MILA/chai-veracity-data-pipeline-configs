@@ -14,8 +14,10 @@ from s3_data_tool import S3DataTool, DataItem
 
 logger = logging.getLogger(__name__)
 
-with open("templates/summarize_cluster.txt") as f:
-    TEMPLATE = f.read()
+
+def _load_template(path: str) -> str:
+    with open(path) as f:
+        return f.read()
 
 
 class Claim(BaseModel):
@@ -61,10 +63,11 @@ async def _generate(
     model_name: str,
     oai_client: openai.AsyncOpenAI,
     max_tokens: int,
+    template: str,
 ) -> ClusterSummary:
     """Call LLM to extract claims from a cluster. Raises on failure."""
     numbered = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(texts))
-    prompt = TEMPLATE.format(posts=numbered)
+    prompt = template.format(posts=numbered)
     response = await oai_client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
@@ -83,12 +86,13 @@ async def _summarize_with_retries(
     oai_client: openai.AsyncOpenAI,
     max_retries: int,
     max_tokens: int,
+    template: str,
 ) -> ClusterSummary:
     exceptions = []
     for _ in range(max_retries):
         try:
             return await _generate(
-                texts, model_name=model_name, oai_client=oai_client, max_tokens=max_tokens
+                texts, model_name=model_name, oai_client=oai_client, max_tokens=max_tokens, template=template,
             )
         except Exception as e:
             exceptions.append(e)
@@ -102,6 +106,7 @@ async def _get_topic_iterator(
     max_retries: int,
     max_tokens: int,
     max_texts_per_cluster: int,
+    template: str,
     batch_filter: str | None = None,
     input_dataset: str = "posts_clustered_004",
 ) -> AsyncIterator[dict[str, Any]]:
@@ -129,7 +134,7 @@ async def _get_topic_iterator(
         prompt_texts = texts[:max_texts_per_cluster]
         async with sem:
             result = await _summarize_with_retries(
-                prompt_texts, model_name, oai_client, max_retries, max_tokens
+                prompt_texts, model_name, oai_client, max_retries, max_tokens, template
             )
 
         rows: list[dict[str, Any]] = []
@@ -181,11 +186,14 @@ async def main():
                         help="Summarize only clusters from this batch name (e.g. x-posts-clusters-20260507).")
     parser.add_argument("--input-dataset", default="posts_clustered_004",
                         help="Dataset to read clusters from (default: posts_clustered_004).")
+    parser.add_argument("--template", default="templates/summarize_cluster.txt",
+                        help="Path to prompt template file (default: templates/summarize_cluster.txt).")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d-%H")
     batch_name = f"bsky-summarize-{timestamp}"
 
+    template = _load_template(args.template)
     oai_client = openai.AsyncOpenAI()
 
     async with S3DataTool().dataset_generator() as dataset_generator:
@@ -197,6 +205,7 @@ async def main():
                 max_retries=args.max_retries,
                 max_tokens=args.max_tokens,
                 max_texts_per_cluster=args.max_texts_per_cluster,
+                template=template,
                 batch_filter=args.batch,
                 input_dataset=args.input_dataset,
             ),

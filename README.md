@@ -166,6 +166,138 @@ uv run python scripts/cluster/test_summarize.py
 
 Uses secrets from `.env` and `.llm-test.env`.
 
+## Double-Clustering Pipeline
+
+Second-level clustering that groups extracted claims into higher-level themes ("meta-clusters"), then synthesizes claims within each meta-cluster. The pipeline reuses the same kNN-graph clustering and LLM summarization infrastructure as the first-level pipeline.
+
+### Data Flow
+
+```
+posts_summarized_003_b        (claims from first-level summarization)
+  -> embed_claims.py          (embed claim texts)
+posts_claims_embedded_001
+  -> cluster_claims.py        (cluster claims by embedding similarity)
+posts_clustered_meta_001
+  -> summarize.py             (synthesize higher-level claims from meta-clusters)
+posts_double_summarized_001
+```
+
+### Embed Claims
+
+Reads claims from `posts_summarized_003_b` and embeds them using an OpenAI-compatible embedding API.
+
+```bash
+# Via SLURM (starts vLLM embedding server with Qwen3-Embedding-0.6B)
+sbatch slurm/slurm_embed_claims.sh
+
+# With overrides
+EMBEDDING_DIMENSIONS=256 MODEL_NAME=Qwen/Qwen3-Embedding-0.6B sbatch slurm/slurm_embed_claims.sh
+
+# Direct invocation (against an already-running embedding API)
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export OPENAI_API_KEY="EMPTY"
+uv run --env-file .env python scripts/cluster/embed_claims.py \
+    --model_name Qwen/Qwen3-Embedding-0.6B \
+    --dimensions 128 \
+    --batch-size 256 \
+    --max-concurrency 36
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model-name` | env `MODEL_NAME` | Embedding model name |
+| `--dimensions` | `128` | Matryoshka embedding dimensions |
+| `--batch-size` | `256` | Items per API call |
+| `--source-dataset` | `posts_summarized_003_b` | Source dataset with claims |
+| `--target-dataset` | `posts_claims_embedded_001` | Destination for embedded claims |
+| `--max-concurrency` | `36` | Max concurrent API calls |
+| `--max-claims` | `0` (all) | Limit number of claims to embed |
+| `--source-filter` | `post_count >= 2` | DuckDB filter for source claims |
+
+### Cluster Claims
+
+Clusters embedded claims using the kNN-graph + connected-components algorithm (same as first-level clustering).
+
+```bash
+# Default: auto-k, drop_frac=0.9, min_cluster_size=2
+uv run --env-file .env python scripts/cluster/cluster_claims.py
+
+# Aim for ~10 meta-clusters with high coherence
+uv run --env-file .env python scripts/cluster/cluster_claims.py \
+    --drop-frac 0.8 --min-cluster-size 3 --outlier-threshold 0.1
+
+# Run with diagnostics to inspect cluster sizes and small-cluster similarities
+uv run --env-file .env python scripts/cluster/cluster_claims.py \
+    --diagnostics --drop-frac 0.9 --min-cluster-size 2
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--k` | auto (`log2(n)`) | kNN neighbours per node |
+| `--drop-frac` | `0.9` | Fraction of farthest edges to prune |
+| `--min-cluster-size` | `2` | Merge clusters smaller than this |
+| `--max-cluster-size` | `0` (disabled) | Split clusters larger than this |
+| `--split-k-scale` | `0.5` | Scale factor for k when sub-clustering |
+| `--outlier-threshold` | `0.0` (disabled) | Cosine similarity floor for outlier detection |
+| `--source-dataset` | `posts_claims_embedded_001` | Source dataset with embedded claims |
+| `--target-dataset` | `posts_clustered_meta_001` | Destination for meta-clusters |
+| `--diagnostics` | `false` | Print diagnostic info without uploading |
+
+### Summarize Meta-Clusters
+
+Summarizes meta-clusters using LLM to synthesize higher-level claims. Uses the existing `summarize.py` script with a specialized template.
+
+```bash
+# Via SLURM (starts vLLM chat server with Qwen3.5-9B)
+sbatch slurm/slurm_summarize_meta_clusters.sh
+
+# Direct invocation (against an already-running API)
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export OPENAI_API_KEY="EMPTY"
+uv run --env-file .env scripts/cluster/summarize.py \
+    --model_name Qwen/Qwen3.5-9B \
+    --max_concurrency 36 \
+    --max_tokens 1024 \
+    --input-dataset posts_clustered_meta_001 \
+    --dataset-name posts_double_summarized_001 \
+    --template templates/summarize_claims_cluster.txt
+```
+
+### Tune Double-Clustering Hyperparameters
+
+Sweeps `drop_frac` x `min_cluster_size` x `outlier_threshold` and evaluates meta-cluster coherence via LLM-as-a-Judge. Uses secrets from `.llm.env`.
+
+```bash
+uv run --env-file .env --env-file .llm.env python scripts/analysis/tune_double_clustering.py \
+    --drop-frac "0.5,0.8,0.9,0.95" \
+    --min-cluster-size "2,3,5,10" \
+    --outlier-threshold "0.0,0.1,0.2" \
+    --sample-size 10 --n-judge-runs 3 \
+    --max-concurrency 32 \
+    --output-dir outputs/tune_double_clustering
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--drop-frac` | `0.5,0.8,0.9,0.95` | Comma-separated drop_frac values |
+| `--min-cluster-size` | `2,3,5,10` | Comma-separated min_cluster_size values |
+| `--outlier-threshold` | `0.0,0.1,0.2` | Comma-separated outlier_threshold values |
+| `--sample-size` | `20` | Clusters to sample per combo for LLM evaluation |
+| `--n-judge-runs` | `1` | Independent sampling runs; >=2 enables 95% CI |
+| `--model-name` | env `MODEL_NAME` | Model for coherence judging |
+| `--max-concurrency` | `16` | Max concurrent LLM calls |
+| `--source-dataset` | `posts_claims_embedded_001` | Source of embedded claims |
+| `--output-dir` | `outputs/tune_double_clustering` | Output directory |
+| `--write-example-clusters` | `3` | Example cluster text files for best config |
+
+Results saved to `outputs/tune_double_clustering/results.csv`, `results.json`, heatmaps, and `example_clusters/` text files.
+
 ## Distill Annotations into Classifier
 
 Set up the training virtual environment (one-time):

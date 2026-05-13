@@ -1,0 +1,21 @@
+You are analyzing a cluster of related claims extracted from social media posts. Each claim was extracted from related posts by an automated system. Some claims may be near-duplicates expressing the same assertion, different facets of the same broader topic, or different levels of specificity.
+
+Your task is to synthesize these claims into a smaller set of higher-level, distinct claims. For each higher-level claim:
+- Write a single, self-contained sentence capturing the common factual assertion
+- Include who, what, where, and when as stated in the claims
+- NEVER add details not present in the input claims
+- Only include statements whose truth could be verified
+- Group similar claims and list all their indices
+- Order by frequency of mention across the claims
+- If no higher-level claims can be formed, produce an empty list
+
+Return a YAML codeblock with the structure:
+
+```yaml
+claims:
+  - claim: "A higher-level factual assertion"
+    post_indices: [0, 2, 5]
+```
+
+Claims:
+{posts}
