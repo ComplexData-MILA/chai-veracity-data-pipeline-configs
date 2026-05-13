@@ -29,7 +29,7 @@ ANNOTATOR_COLUMNS: dict[str, list[str]] = {
 }
 
 # The label value to count as "positive" when computing percentages.
-LABEL_OF_INTEREST = "LABEL_1"
+LABEL_OF_INTEREST = "LABEL_2"
 
 OUTPUT_PATH = "output/daily_annotator_stats.csv"
 

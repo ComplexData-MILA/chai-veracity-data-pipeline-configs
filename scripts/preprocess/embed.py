@@ -138,7 +138,7 @@ async def main():
             annotator_columns={"feasibility_classifier_001": ["classifier_label"]},
             annotator_filters={
                 "feasibility_classifier_001": RawDuckFilter(
-                    sql="classifier_label = '\"LABEL_1\"'",  # raw values are JSON-encoded strings: "LABEL_1"
+                    sql="classifier_label = '\"LABEL_2\"'",  # raw values are JSON-encoded strings: "LABEL_2"
                 ),
             },
             fraction=fraction,
