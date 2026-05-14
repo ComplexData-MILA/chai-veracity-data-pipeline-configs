@@ -46,6 +46,38 @@ EXPORT_MODES: dict[str, ExportConfig] = {
         ],
         base_filter=RawDuckFilter(sql="post_count >= 2"),
     ),
+    "embedded_claims": ExportConfig(
+        name="posts_claims_embedded_001",
+        base_columns=[
+            "claim",
+            "claim_id",
+            "cluster_id",
+            "embedding_dim",
+            "post_count",
+            "original_ids",
+            "original_texts",
+        ],
+    ),
+    "meta_clusters": ExportConfig(
+        name="posts_clustered_meta_001",
+        base_columns=[
+            "claim_id",
+            "cluster_id",
+            "num_claims",
+            "total_post_count",
+        ],
+    ),
+    "double_summarized": ExportConfig(
+        name="posts_double_summarized_001",
+        base_columns=[
+            "claim",
+            "cluster_id",
+            "post_count",
+            "original_ids",
+            "original_texts",
+            "date",
+        ],
+    ),
 }
 
 
