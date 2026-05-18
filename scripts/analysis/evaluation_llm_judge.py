@@ -182,17 +182,15 @@ async def evaluate(args):
                 all_labels[text] = {}
             all_labels[text][path] = s["is_feasible"]
 
-    # Combined evaluation
+    # Human-human agreement
     if len(file_samples) > 1:
-        print("\n--- Combined (LLM judge + all annotators) ---")
+        print("\n--- Human-human agreement ---")
         rater_paths = sorted(file_samples.keys())
         rows = []
         for text in all_texts:
-            if text not in text_to_pred:
-                continue
             if not all(text in all_labels and p in all_labels[text] for p in rater_paths):
                 continue
-            row = [text_to_pred[text]]
+            row = []
             for p in rater_paths:
                 row.append(all_labels[text][p])
             rows.append(row)
@@ -201,7 +199,7 @@ async def evaluate(args):
             ratings = np.array(rows, dtype=np.float64)
             kappa = fleiss_kappa(ratings)
             print(f"  Texts in intersection: {len(rows)}")
-            print(f"  Raters: LLM + {len(rater_paths)} annotators")
+            print(f"  Raters: {len(rater_paths)} human annotators")
             print(f"  Fleiss' Kappa: {kappa:.4f}")
         else:
             print("  No texts in intersection.")

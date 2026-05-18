@@ -87,6 +87,7 @@ async def _process(
     max_cluster_size: int = 0,
     split_k_scale: float = 0.5,
     outlier_threshold: float = 0.0,
+    merge_threshold: float = 0.0,
 ) -> list[list[DataItem]]:
     """Collect, cluster, and upload embedded claims."""
     rows, embeddings = await _collect_embedded_claims(source_dataset)
@@ -107,6 +108,7 @@ async def _process(
         max_cluster_size=max_cluster_size,
         split_k_scale=split_k_scale,
         outlier_threshold=outlier_threshold,
+        merge_threshold=merge_threshold,
     )
 
     logger.info("Produced %d meta-clusters from %d claims.", len(clusters), n)
@@ -141,6 +143,8 @@ async def main():
                         help="Scale factor for k when sub-clustering")
     parser.add_argument("--outlier-threshold", type=float, default=0.0,
                         help="Cosine similarity floor for outlier detection")
+    parser.add_argument("--merge-threshold", type=float, default=0.0,
+                        help="Cosine similarity above which any two cluster centroids are merged (default: 0.0 = disabled)")
     parser.add_argument("--source-dataset", default="posts_claims_embedded_001")
     parser.add_argument("--target-dataset", default="posts_clustered_meta_001")
     parser.add_argument("--diagnostics", action="store_true",
@@ -161,6 +165,7 @@ async def main():
             max_cluster_size=args.max_cluster_size,
             split_k_scale=args.split_k_scale,
             outlier_threshold=args.outlier_threshold,
+            merge_threshold=args.merge_threshold,
         )
         print(f"\nDiagnostics: {diag.n_initial} initial -> {diag.n_after_split} after split "
               f"-> {diag.n_after_merge} after merge, {diag.total_items} total items")
@@ -180,6 +185,7 @@ async def main():
             max_cluster_size=args.max_cluster_size,
             split_k_scale=args.split_k_scale,
             outlier_threshold=args.outlier_threshold,
+            merge_threshold=args.merge_threshold,
         )
 
 

@@ -363,6 +363,81 @@ def _merge_undersized_clusters(
         return result.astype(np.int32), set(), sim_data
 
 
+def _merge_similar_clusters(
+    matrix: np.ndarray,         # (n, dim)
+    labels: np.ndarray,         # (n,) int
+    merge_threshold: float,     # cosine similarity above which clusters are merged
+) -> np.ndarray:                # (n,) int — new labels
+    """Greedily merge clusters whose centroid cosine similarity exceeds *merge_threshold*.
+
+    Repeatedly finds the most similar pair of clusters and merges them, updating
+    centroids after each merge, until no pair exceeds the threshold.  This catches
+    topically-related clusters that the kNN graph kept separate because their
+    individual items were not each other's nearest neighbors.
+    """
+    unique_labels, compressed = np.unique(labels, return_inverse=True)
+    n_clusters = len(unique_labels)
+
+    if n_clusters <= 1:
+        return labels
+
+    sizes = np.bincount(compressed, minlength=n_clusters)
+    centroids = _compute_centroids(matrix, compressed, n_clusters)
+    centroids_norm = centroids / np.linalg.norm(centroids, axis=1, keepdims=True)
+
+    # Pairwise cosine similarity matrix (upper triangle only for efficiency)
+    sim = centroids_norm @ centroids_norm.T  # (n_clusters, n_clusters)
+    np.fill_diagonal(sim, -1.0)
+
+    # Greedy merging: repeatedly merge the most similar pair
+    while True:
+        best_i, best_j = np.unravel_index(sim.argmax(), sim.shape)
+        best_sim = sim[best_i, best_j]
+        if best_sim < merge_threshold:
+            break
+
+        # Merge cluster j into cluster i
+        mask_j = (compressed == best_j)
+        compressed[mask_j] = best_i
+
+        # Update centroid for i (weighted average)
+        size_i, size_j = sizes[best_i], sizes[best_j]
+        merged_centroid = ((centroids[best_i] * size_i + centroids[best_j] * size_j)
+                           / (size_i + size_j))
+        centroids[best_i] = merged_centroid
+        sizes[best_i] = size_i + size_j
+
+        # Invalidate cluster j
+        sizes[best_j] = 0
+        centroids[best_j] = 0.0
+        sim[best_j, :] = -1.0
+        sim[:, best_j] = -1.0
+
+        # Recompute similarities for cluster i
+        ci_norm = centroids[best_i] / np.linalg.norm(centroids[best_i])
+        for k in range(n_clusters):
+            if k == best_i or sizes[k] == 0:
+                continue
+            ck_norm = centroids[k] / np.linalg.norm(centroids[k])
+            sim[best_i, k] = float(ci_norm @ ck_norm)
+            sim[k, best_i] = sim[best_i, k]
+        sim[best_i, best_i] = -1.0
+
+        logger.debug("Merged clusters %d and %d (sim=%.3f)", best_i, best_j, best_sim)
+
+    # Compact out invalidated clusters
+    valid = sizes > 0
+    if valid.all():
+        return labels
+
+    old_to_new = np.full(n_clusters, -1, dtype=np.int32)
+    old_to_new[valid] = np.arange(valid.sum())
+    _, result = np.unique(old_to_new[compressed], return_inverse=True)
+    logger.info("Centroid merge: %d -> %d clusters (threshold=%.2f)",
+                n_clusters, valid.sum(), merge_threshold)
+    return result.astype(np.int32)
+
+
 def cluster_knn_graph(
     rows: list,
     embeddings: list[np.ndarray],
@@ -372,6 +447,7 @@ def cluster_knn_graph(
     max_cluster_size: int = 0,
     split_k_scale: float = 0.5,
     outlier_threshold: float = 0.0,
+    merge_threshold: float = 0.0,
 ) -> list[list[DataItem]]:
     """
     Cluster *rows* by building a kNN graph over their *embeddings* and
@@ -396,6 +472,10 @@ def cluster_knn_graph(
                            threshold vs all large clusters are dropped as
                            outliers.  Only active when min_cluster_size > 0
                            (default 0.0 = disabled).
+        merge_threshold:   Cosine similarity above which any two clusters are
+                           merged (greedy centroid-based).  Use to collapse
+                           near-duplicate clusters that the kNN graph kept
+                           separate (default 0.0 = disabled).
 
     Returns:
         list[list[DataItem]] — one inner list per discovered cluster,
@@ -418,7 +498,7 @@ def cluster_knn_graph(
         f"Initial: {n_clusters} clusters (k={k}, n={n})",
     )
 
-    # Post-processing: split → merge → drop outliers
+    # Post-processing: split → merge → centroid-merge → drop outliers
     if max_cluster_size > 0:
         labels = _split_overlarge_clusters(
             matrix, labels, max_cluster_size, k, drop_frac, split_k_scale,
@@ -431,6 +511,11 @@ def cluster_knn_graph(
             matrix, labels, min_cluster_size, outlier_threshold,
         )
         logger.info("After merge: %d labels", len(np.unique(labels)))
+
+    if merge_threshold > 0:
+        labels = _merge_similar_clusters(
+            matrix, labels, merge_threshold,
+        )
 
     # Rebuild cluster lists — labels may be non-contiguous after processing
     unique_labels, inverse = np.unique(labels, return_inverse=True)
@@ -459,6 +544,7 @@ def cluster_knn_graph_with_diagnostics(
     max_cluster_size: int = 0,
     split_k_scale: float = 0.5,
     outlier_threshold: float = 0.0,
+    merge_threshold: float = 0.0,
 ) -> tuple[list[list[DataItem]], ClusterDiagnostics]:
     """Same as cluster_knn_graph but returns per-cluster diagnostic info.
 
@@ -506,6 +592,12 @@ def cluster_knn_graph_with_diagnostics(
         )
         n_after_merge = len(np.unique(labels))
         logger.info("After merge: %d labels", n_after_merge)
+
+    # Centroid-based merge of near-duplicate clusters
+    if merge_threshold > 0:
+        labels = _merge_similar_clusters(
+            matrix, labels, merge_threshold,
+        )
 
     # Rebuild cluster lists
     unique_labels, inverse = np.unique(labels, return_inverse=True)
@@ -557,6 +649,7 @@ async def _process_day(
     max_cluster_size: int = 0,
     split_k_scale: float = 0.5,
     outlier_threshold: float = 0.0,
+    merge_threshold: float = 0.0,
     output_batch_name: str | None = None,
 ) -> list[list[DataItem]]:
     """Collect, cluster, and upload one day's worth of data."""
@@ -580,6 +673,7 @@ async def _process_day(
         max_cluster_size=max_cluster_size,
         split_k_scale=split_k_scale,
         outlier_threshold=outlier_threshold,
+        merge_threshold=merge_threshold,
     )
 
     for i, cluster in enumerate(clusters):
@@ -613,6 +707,8 @@ async def main() -> list[list]:
                         help="Scale factor for k when sub-clustering (default: 0.5)")
     parser.add_argument("--outlier-threshold", type=float, default=0.0,
                         help="Cosine similarity floor for small-cluster merging (default: 0.0 = disabled)")
+    parser.add_argument("--merge-threshold", type=float, default=0.0,
+                        help="Cosine similarity above which any two cluster centroids are merged (default: 0.0 = disabled)")
     parser.add_argument("--batch", default=None,
                         help="Process only this specific batch name (overrides --limit).")
     args = parser.parse_args()
@@ -628,6 +724,7 @@ async def main() -> list[list]:
             max_cluster_size=args.max_cluster_size,
             split_k_scale=args.split_k_scale,
             outlier_threshold=args.outlier_threshold,
+            merge_threshold=args.merge_threshold,
             output_batch_name=output_batch_name,
         )
         return all_clusters
@@ -653,6 +750,7 @@ async def main() -> list[list]:
             max_cluster_size=args.max_cluster_size,
             split_k_scale=args.split_k_scale,
             outlier_threshold=args.outlier_threshold,
+            merge_threshold=args.merge_threshold,
         )
         if clusters:  # only count days that yielded results
             processed += 1
