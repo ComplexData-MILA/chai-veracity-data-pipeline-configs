@@ -17,6 +17,7 @@ dependencies = [
     "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@7983135cfa8a6db14ef0c34c7139eb9b54599e54",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
+    "trafilatura>=2.0.0",
 ]
 
 [dependency-groups]
