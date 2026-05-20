@@ -45,7 +45,12 @@ class BatchCoordinator(ABC):
                 except asyncio.TimeoutError:
                     break
 
-            await self._send_batch(batch)
+            try:
+                await self._send_batch(batch)
+            except Exception as exc:
+                for _, future in batch:
+                    if not future.done():
+                        future.set_exception(exc)
 
     @abstractmethod
     async def _send_batch(

@@ -70,7 +70,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", required=True)
     parser.add_argument("--base_url", default="http://127.0.0.1:8000")
-    parser.add_argument("--max_concurrency", type=int, default=128)
+    parser.add_argument("--max_concurrency", type=int, default=8)
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -94,6 +94,17 @@ async def main():
         default=None,
         help="Override the fraction of rows to annotate (default: 0.01 normally, 1.0 when --batch is set).",
     )
+    parser.add_argument(
+        "--annotator_name",
+        default="feasibility_classifier_001_full",
+        help="Name for the annotator (determines S3 storage path).",
+    )
+    parser.add_argument(
+        "--max_batches",
+        type=int,
+        default=1,
+        help="Max batches to claim per job (default: 1).",
+    )
     args = parser.parse_args()
 
     fraction = args.fraction if args.fraction is not None else (1.0 if args.batch else 0.01)
@@ -110,14 +121,15 @@ async def main():
 
         async with S3DataTool().filter_for_annotation(
             name="posts",
-            annotator_name="feasibility_classifier_001",
+            annotator_name=args.annotator_name,
             base_columns=["text"],
             fraction=fraction,
         ) as annotator_view:
             await annotator_view.annotate(
                 lambda item: coordinator.annotate(item),
                 max_concurrency=args.max_concurrency,
-                streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
+                max_batches=args.max_batches,
+                streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10000),
                 batches=[args.batch] if args.batch else None,
             )
 

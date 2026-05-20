@@ -217,6 +217,7 @@ class BlueskyJetstreamPosts(AsyncIterator[dict[str, Any]]):
             raw=event,
         )
 
+
 T = TypeVar("T")
 
 

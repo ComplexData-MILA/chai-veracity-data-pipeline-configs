@@ -70,17 +70,32 @@ deactivate
 cd $PROJECT_HOME
 source $PROJECT_HOME/.env
 
+ANNOTATOR_NAME="${ANNOTATOR_NAME:-feasibility_classifier_001_full}"
+FRACTION="${FRACTION:-1.0}"
+MAX_BATCHES="${MAX_BATCHES:-1}"
+BATCH="${BATCH:-}"
+
+BATCH_ARGS=()
+if [ -n "$BATCH" ]; then
+    BATCH_ARGS=(--batch "$BATCH")
+fi
+
 uv run -m scripts.filter.classifier \
     --model_name $MODEL_NAME \
     --base_url "http://127.0.0.1:${VLLM_PORT}" \
-    --max_concurrency 36 \
-    --batch x-posts-20260507-06 \
-    --fraction 1.0
+    --max_concurrency 8 \
+    --batch_size 256 \
+    --annotator_name "$ANNOTATOR_NAME" \
+    --fraction "$FRACTION" \
+    --max_batches "$MAX_BATCHES" \
+    "${BATCH_ARGS[@]}"
 
 EXIT_CODE=$?
 
 kill $SERVER_PID 2>/dev/null
-wait $SERVER_PID 2>/dev/null
+sleep 5
+kill -9 $SERVER_PID 2>/dev/null
+wait $SERVER_PID 2>/dev/null || true
 
 echo "Job finished with exit code $EXIT_CODE"
 exit $EXIT_CODE

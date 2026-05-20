@@ -115,10 +115,21 @@ async def main():
         default=None,
         help="Override the fraction of rows to annotate (default: 0.05 normally, 1.0 when --batch is set).",
     )
+    parser.add_argument(
+        "--annotator_name",
+        default=None,
+        help="Override the annotator name (default: embeddings_{dimensions}d).",
+    )
+    parser.add_argument(
+        "--max_batches",
+        type=int,
+        default=None,
+        help="Max batches to claim per job (default: all).",
+    )
     args = parser.parse_args()
     oai_client = openai.AsyncOpenAI()
 
-    annotator_name = f"embeddings_{args.dimensions}d"
+    annotator_name = args.annotator_name or f"embeddings_{args.dimensions}d"
     fraction = args.fraction if args.fraction is not None else (1.0 if args.batch else 0.05)
 
     coordinator = EmbeddingBatchCoordinator(
@@ -135,9 +146,9 @@ async def main():
             name="posts",
             annotator_name=annotator_name,
             base_columns=["text"],
-            annotator_columns={"feasibility_classifier_001": ["classifier_label"]},
+            annotator_columns={"feasibility_classifier_001_full": ["classifier_label"]},
             annotator_filters={
-                "feasibility_classifier_001": RawDuckFilter(
+                "feasibility_classifier_001_full": RawDuckFilter(
                     sql="classifier_label = '\"LABEL_2\"'",  # raw values are JSON-encoded strings: "LABEL_2"
                 ),
             },
@@ -149,6 +160,7 @@ async def main():
             max_concurrency=args.max_concurrency,
             streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
             batches=[args.batch] if args.batch else None,
+            max_batches=args.max_batches,
         )
 
     await coordinator.close()
