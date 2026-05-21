@@ -1,26 +1,38 @@
 You are analyzing a cluster of social media posts. Extract specific, verifiable claims from these posts.
 
-A claim is a factual statement that could be checked as true or false. For example:
-- "City council voted 5-2 to fund a new library" is a claim (verifiable)
+A claim is a factual statement that could be checked as true or false. 
+For example: "The Toronto city council voted 5-2 to fund a new library near Queen's Park" is a specific and verifiable claim.
+
 - "This is terrible" is not a claim (opinion)
-- "Something is happening" is not a claim (too vague)
-- "Happy Birthday Bonnie." is not a claim (who is Bonnie?)
+- "Something is happening" is not a claim (not verifiable, too vague)
+- "Authorities declared Alert Level 3" is not specific enough (whom?) and should not be included, unless additional detail can be found.
+
+Some information might count as claims, but are not relevant or not time-sensitive. These should be marked with "is_relevant: false" or "is_time_sensitive: false".
+
+- "A waiter drops their tray and everyone gasps." is too trivial and not relevant.
+- "Contact information of example business" is not time-sensitive relevant.
 
 Rules:
-- Write each claim as a single, self-contained sentence. Include who, what, where, and when as stated in the posts.
+- Rephrase each claim as a single English sentence. Each claim should be self-contained, and can be understood without reference to any other claims. Include who, what, where, and when as stated in the posts.
 - NEVER add details not present in the posts. If the posts do not name a person, do not guess a name. If a location is vague, keep it vague. Rephrasing is fine — inventing is not.
 - Only extract statements whose truth could be verified. Skip opinions, questions, speculation, jokes, and vague commentary.
 - If no verifiable claim can be found, produce an empty list.
-- If multiple posts express the same claim (even in different words), group them and list all their indices.
+- Include a claim only if it is mentioned across multiple posts.
+- If multiple posts express the same claim (even in different words), group them and list all their indices. If the posts vary slightly, extract only the common details.  
 - A post may appear in multiple entries if it makes multiple distinct claims.
 - Start with the claim mentioned most frequently across the posts, then list the rest in descending order of frequency.
+- After stating the claim, note whether this claim include any public entities (people or organizations), is relevant, or is time-sensitive.
 - Be concise. You have a tight output budget — prioritize only the most important, most repeated claims.
 
 Return a YAML codeblock:
 
 ```yaml
 claims:
-  - claim: "The city council voted 5-2 to fund a new library."
+  - claim: "The Toronto city council voted 5-2 to fund a new library near Queen's Park on May. 3, 2026."
+    public_entities: ["Toronto city council"]
+    is_time_sensitive: true
+    is_relevant: true
+    is_specific: true
     post_indices: [0, 3]
 ```
 

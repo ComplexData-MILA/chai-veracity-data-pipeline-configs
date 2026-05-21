@@ -1,23 +1,38 @@
 #!/bin/bash
-#SBATCH --job-name=cdl-summarize
-#SBATCH --output=logs/summarize_%j.out
-#SBATCH --error=logs/summarize_%j.err
+#SBATCH --job-name=cdl-emb
+#SBATCH --output=logs/embedding_%A_%a.out
+#SBATCH --error=logs/embedding_%A_%a.err
 
 #SBATCH -c 8
 #SBATCH --gres=gpu:ampere:1
 #SBATCH --mem=48GB
-#SBATCH -t 3:00:00
+#SBATCH -t 6:00:00
 
 set -e
 
+# --- Configuration via environment variables (set at submit time) ---
 export PROJECT_HOME=$HOME/20260331-chai-veracity
-export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-9B}"
+export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}"
+export EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-128}"
+export VLLM_PORT="${VLLM_PORT:-$((9000 + ${SLURM_ARRAY_TASK_ID:-0} * 100))}"
+
+ANNOTATOR_NAME="${ANNOTATOR_NAME:-embeddings_128d}"
+FRACTION="${FRACTION:-1.0}"
+MAX_BATCHES="${MAX_BATCHES:-}"
+BATCH="${BATCH:-}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-36}"
+
+echo "=== Task $SLURM_ARRAY_TASK_ID ==="
+echo "Job ID: $SLURM_ARRAY_JOB_ID / Task: $SLURM_ARRAY_TASK_ID"
+echo "Model: $MODEL_NAME | Port: $VLLM_PORT | Dims: $EMBEDDING_DIMENSIONS"
+echo "Annotator: $ANNOTATOR_NAME | Fraction: $FRACTION | Max Batches: ${MAX_BATCHES:-all}"
+[ -n "$BATCH" ] && echo "Specific batch: $BATCH"
 
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor
 
 # Transfer venv tarball to local disk to avoid BeeGFS metadata cache races.
-VENV_LOCAL="/tmp/$USER/uv-venv/vllm_${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
+VENV_LOCAL="/tmp/$USER/uv-venv/vllm_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 echo "Extracting venv tarball to $VENV_LOCAL ..."
 mkdir -pv "$(dirname "$VENV_LOCAL")"
 tar -xzf "$SCRATCH/uv-venv/vllm.tar.gz" -C "$(dirname "$VENV_LOCAL")"
@@ -35,22 +50,24 @@ sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$VENV_LOCAL/bin/activate"
 for f in "$VENV_LOCAL/bin/"*; do
     [ -f "$f" ] && [ ! -L "$f" ] && head -c2 "$f" | grep -q '#!' && sed -i "s|$OLD_VENV|$VENV_LOCAL|g" "$f"
 done
-unset UV_VENVS_BASE VIRTUAL_ENV
 source "$VENV_LOCAL/bin/activate"
-export
+unset UV_VENVS_BASE VIRTUAL_ENV
 
-export VLLM_PORT="${VLLM_PORT:-$((8000 + ${SLURM_JOB_ID: -3}))}"
+# Build server launch command
+SERVER_CMD="$VENV_LOCAL/bin/vllm serve"
+SERVER_CMD="$SERVER_CMD $MODEL_NAME"
+SERVER_CMD="$SERVER_CMD --port $VLLM_PORT"
 
-echo "Job ID: $SLURM_JOB_ID | Port: $VLLM_PORT"
+# Configure Matryoshka dimensions if specified
+echo "Using Matryoshka dimensions: $EMBEDDING_DIMENSIONS"
+SERVER_CMD="$SERVER_CMD --hf-overrides '{\"is_matryoshka\": true}'"
+
+echo "Launching vLLM embedding server..."
+echo "Command: $SERVER_CMD"
 
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 
-vllm serve $MODEL_NAME \
-    --port $VLLM_PORT \
-    --tensor-parallel-size 1 \
-    --max-model-len 262144 \
-    --reasoning-parser qwen3 &
-
+eval $SERVER_CMD &
 SERVER_PID=$!
 echo SERVER_PID: $SERVER_PID
 echo "Waiting for vLLM server to start..."
@@ -67,7 +84,6 @@ while ! curl -s "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null; do
 done
 echo "Server is healthy."
 
-
 deactivate
 
 cd $PROJECT_HOME
@@ -76,36 +92,17 @@ source $PROJECT_HOME/.env
 export OPENAI_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1
 export OPENAI_API_KEY="EMPTY"
 
-# Pass through optional overrides from environment
-MAX_TOKENS="${MAX_TOKENS:-1024}"
-DATASET_NAME="${DATASET_NAME:-posts_summarized_001}"
-INPUT_DATASET="${INPUT_DATASET:-posts_clustered_kmeans_001}"
-TEXT_COLUMN="${TEXT_COLUMN:-central_sample_texts}"
-COPY_COLUMNS="${COPY_COLUMNS:-central_sample_ids}"
-BATCH="${BATCH:-}"
-MAX_CLUSTERS="${MAX_CLUSTERS:-}"
+# Build annotation command
+ANNOTATION_CMD="uv run -m scripts.preprocess.embed --model_name $MODEL_NAME --annotator_name $ANNOTATOR_NAME --max_concurrency $MAX_CONCURRENCY"
+ANNOTATION_CMD="$ANNOTATION_CMD --fraction $FRACTION"
+[ -n "$BATCH" ] && ANNOTATION_CMD="$ANNOTATION_CMD --batch $BATCH"
+[ -n "$MAX_BATCHES" ] && ANNOTATION_CMD="$ANNOTATION_CMD --max_batches $MAX_BATCHES"
 
-BATCH_ARG=""
-[ -n "$BATCH" ] && BATCH_ARG="--batch $BATCH"
-MAX_CLUSTERS_ARG=""
-[ -n "$MAX_CLUSTERS" ] && MAX_CLUSTERS_ARG="--max-clusters $MAX_CLUSTERS"
-
-uv run scripts/cluster/summarize.py \
-    --model_name $MODEL_NAME \
-    --max_concurrency 36 \
-    --max_tokens $MAX_TOKENS \
-    --dataset-name $DATASET_NAME \
-    --input-dataset $INPUT_DATASET \
-    --text-column $TEXT_COLUMN \
-    --copy-columns $COPY_COLUMNS \
-    $BATCH_ARG \
-    $MAX_CLUSTERS_ARG
+echo "Starting embedding annotation..."
+echo "Command: $ANNOTATION_CMD"
+eval $ANNOTATION_CMD
 
 EXIT_CODE=$?
 
-# Stop the vLLM server
-kill $SERVER_PID 2>/dev/null
-wait $SERVER_PID 2>/dev/null
-
-echo "Job finished with exit code $EXIT_CODE"
+echo "Task $SLURM_ARRAY_TASK_ID finished with exit code $EXIT_CODE"
 exit $EXIT_CODE

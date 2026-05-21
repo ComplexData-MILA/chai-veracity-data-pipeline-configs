@@ -15,6 +15,7 @@ class ExportConfig(BaseModel):
     annotator_columns: dict[str, list[str]] = {}
     annotator_filters: dict[str, FilterNode] = {}
     base_filter: FilterNode | None = None
+    create_subsets_on: str | None = None
 
 
 EXPORT_MODES: dict[str, ExportConfig] = {
@@ -57,6 +58,32 @@ EXPORT_MODES: dict[str, ExportConfig] = {
             "original_ids",
             "original_texts",
         ],
+    ),
+    "clusters_summarized": ExportConfig(
+        name="posts_summarized_005_diverse",
+        base_columns=[
+            "_batch",
+            "claim",
+            "cluster_id",
+            "date",
+            "diverse_sample_ids",
+            "post_count",
+            "original_texts",
+        ],
+        create_subsets_on="date",
+    ),
+    "clusters_summarized_kmeans": ExportConfig(
+        name="posts_summarized_007_diverse_kmeans",
+        base_columns=[
+            "_batch",
+            "claim",
+            "cluster_id",
+            "date",
+            "diverse_sample_ids",
+            "post_count",
+            "original_texts",
+        ],
+        create_subsets_on="date",
     ),
     "meta_clusters": ExportConfig(
         name="posts_clustered_meta_001",
@@ -102,8 +129,25 @@ async def main(mode: str, hub_path: str | None = None, private: bool = False):
     print(f"Created dataset with {len(ds)} rows, columns: {ds.column_names}")
 
     if hub_path:
-        ds.push_to_hub(hub_path, private=private)
-        print(f"Pushed dataset to {hub_path}")
+        if config.create_subsets_on:
+            col = config.create_subsets_on
+            if col not in ds.column_names:
+                raise ValueError(
+                    f"create_subsets_on column '{col}' not found in "
+                    f"dataset columns: {ds.column_names}"
+                )
+            values = sorted(set(ds[col]))
+            print(f"Creating {len(values)} subsets on column '{col}': {values}")
+            ds.push_to_hub(hub_path, config_name="default", private=private)
+            print(f"Pushed default subset ({len(ds)} rows) to {hub_path}")
+            for val in values:
+                subset = ds.filter(lambda row, v=val: row[col] == v)
+                config = str(val)
+                subset.push_to_hub(hub_path, config_name=config, private=private)
+                print(f"Pushed subset '{config}' ({len(subset)} rows) to {hub_path}")
+        else:
+            ds.push_to_hub(hub_path, private=private)
+            print(f"Pushed dataset to {hub_path}")
     else:
         print("No --hub-path provided; dataset not pushed.")
         print(ds)

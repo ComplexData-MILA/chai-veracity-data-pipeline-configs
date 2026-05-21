@@ -22,6 +22,10 @@ def _load_template(path: str) -> str:
 
 class Claim(BaseModel):
     claim: str
+    public_entities: list[str]
+    is_time_sensitive: bool
+    is_relevant: bool
+    is_specific: bool
     post_indices: list[int]
 
 
@@ -92,7 +96,11 @@ async def _summarize_with_retries(
     for _ in range(max_retries):
         try:
             return await _generate(
-                texts, model_name=model_name, oai_client=oai_client, max_tokens=max_tokens, template=template,
+                texts,
+                model_name=model_name,
+                oai_client=oai_client,
+                max_tokens=max_tokens,
+                template=template,
             )
         except Exception as e:
             exceptions.append(e)
@@ -106,11 +114,18 @@ async def _get_topic_iterator(
     max_retries: int,
     max_tokens: int,
     max_texts_per_cluster: int,
+    max_claims_per_cluster: int,
     template: str,
     batch_filter: str | None = None,
     input_dataset: str = "posts_clustered_004",
+    text_column: str = "text",
+    copy_columns: list[str] | None = None,
+    max_clusters: int | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream clusters, summarize each, yield one row per topic."""
+    if copy_columns is None:
+        copy_columns = []
+
     sem = asyncio.Semaphore(max_concurrency)
 
     _DATE_RE = re.compile(r"(\d{8})")
@@ -123,8 +138,7 @@ async def _get_topic_iterator(
             return []
 
     async def _process_inner(item: DataItem) -> list[dict[str, Any]]:
-        texts = item.data.get("text", [])
-        original_ids = item.data.get("original_ids", [])
+        texts = item.data.get(text_column, [])
         if not texts:
             return []
 
@@ -138,36 +152,44 @@ async def _get_topic_iterator(
             )
 
         rows: list[dict[str, Any]] = []
-        for claim in result.claims:
-            claim_ids = [
-                original_ids[i]
-                for i in claim.post_indices
-                if i < len(original_ids)
-            ]
-            claim_texts = [
-                texts[i]
-                for i in claim.post_indices
-                if i < len(texts)
-            ]
-            rows.append({
+        claims_sorted = sorted(
+            result.claims[:max_claims_per_cluster], key=lambda x: len(x.post_indices)
+        )
+        for claim in claims_sorted:
+            claim_texts = [texts[i] for i in claim.post_indices if i < len(texts)]
+            row: dict[str, Any] = {
                 "cluster_id": item.id,
                 "claim": claim.claim,
-                "post_count": len(claim_ids),
-                "original_ids": claim_ids,
+                "post_count": len(claim_texts),
                 "original_texts": claim_texts,
                 "date": date_str,
-            })
+                **{
+                    k: v
+                    for k, v in claim.model_dump()
+                    if k.startswith("is_") or k in ["public_entities"]
+                },
+            }
+            for col in copy_columns:
+                col_data = item.data.get(col, [])
+                row[col] = [
+                    col_data[i] for i in claim.post_indices if i < len(col_data)
+                ]
+            rows.append(row)
         return rows
 
     async with S3DataTool().filter_for_export(
         name=input_dataset,
-        base_columns=["text", "original_ids"],
+        base_columns=[text_column] + list(copy_columns),
     ) as generator:
         tasks = []
+        cluster_count = 0
         async for item in generator:
             if batch_filter and item.batch != batch_filter:
                 continue
+            if max_clusters is not None and cluster_count >= max_clusters:
+                break
             tasks.append(asyncio.create_task(_process(item)))
+            cluster_count += 1
 
         for task in asyncio.as_completed(tasks):
             for row in await task:
@@ -182,12 +204,38 @@ async def main():
     parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--max-texts-per-cluster", type=int, default=32)
-    parser.add_argument("--batch", default=None,
-                        help="Summarize only clusters from this batch name (e.g. x-posts-clusters-20260507).")
-    parser.add_argument("--input-dataset", default="posts_clustered_004",
-                        help="Dataset to read clusters from (default: posts_clustered_004).")
-    parser.add_argument("--template", default="templates/summarize_cluster.txt",
-                        help="Path to prompt template file (default: templates/summarize_cluster.txt).")
+    parser.add_argument("--max-claims-per-cluster", type=int, default=3)
+    parser.add_argument(
+        "--batch",
+        default=None,
+        help="Summarize only clusters from this batch name (e.g. x-posts-clusters-20260507).",
+    )
+    parser.add_argument(
+        "--input-dataset",
+        default="posts_clustered_004",
+        help="Dataset to read clusters from (default: posts_clustered_004).",
+    )
+    parser.add_argument(
+        "--template",
+        default="templates/summarize_cluster.txt",
+        help="Path to prompt template file (default: templates/summarize_cluster.txt).",
+    )
+    parser.add_argument(
+        "--text-column",
+        default="text",
+        help="Column name for the texts list (default: text).",
+    )
+    parser.add_argument(
+        "--copy-columns",
+        default="original_ids",
+        help="Column names to copy into output (default: original_ids), comma-separated.",
+    )
+    parser.add_argument(
+        "--max-clusters",
+        type=int,
+        default=None,
+        help="Stop after processing this many clusters (default: no limit).",
+    )
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d-%H")
@@ -205,9 +253,13 @@ async def main():
                 max_retries=args.max_retries,
                 max_tokens=args.max_tokens,
                 max_texts_per_cluster=args.max_texts_per_cluster,
+                max_claims_per_cluster=args.max_claims_per_cluster,
                 template=template,
                 batch_filter=args.batch,
                 input_dataset=args.input_dataset,
+                text_column=args.text_column,
+                copy_columns=args.copy_columns.split(","),
+                max_clusters=args.max_clusters,
             ),
             name=args.dataset_name,
             batch=batch_name,

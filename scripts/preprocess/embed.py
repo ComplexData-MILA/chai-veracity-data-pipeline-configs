@@ -42,7 +42,7 @@ class EmbeddingBatchCoordinator(BatchCoordinator):
         self.model_name = model_name
         self.dimensions = dimensions
 
-    @backoff.on_exception(backoff.expo, [openai.APIConnectionError])
+    @backoff.on_exception(backoff.expo, (openai.APIConnectionError,))
     async def _send_batch(
         self,
         batch: list[tuple[DataItem, asyncio.Future[Annotation]]],
@@ -146,9 +146,9 @@ async def main():
             name="posts",
             annotator_name=annotator_name,
             base_columns=["text"],
-            annotator_columns={"feasibility_classifier_001_full": ["classifier_label"]},
+            annotator_columns={"feasibility_classifier_003": ["classifier_label"]},
             annotator_filters={
-                "feasibility_classifier_001_full": RawDuckFilter(
+                "feasibility_classifier_003": RawDuckFilter(
                     sql="classifier_label = '\"LABEL_2\"'",  # raw values are JSON-encoded strings: "LABEL_2"
                 ),
             },
