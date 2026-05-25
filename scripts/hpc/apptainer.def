@@ -1,0 +1,28 @@
+Bootstrap: docker
+From: python:3.13-slim
+
+%files
+    /tmp/hpc-requirements.txt /opt/requirements.txt
+    # Offline clustering script
+    /mnt/chai-veracity-data-pipeline-configs/scripts/hpc/clustering_offline.py /opt/scripts/clustering_offline.py
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        libopenblas0 \
+        libgomp1 \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir -r /opt/requirements.txt
+
+%environment
+    export PYTHONPATH=/opt/scripts
+    export PATH=/usr/local/bin:$PATH
+    # Threading: let SLURM/OpenMP auto-detect available cores.
+    # Unset restrictive single-thread defaults inherited from base image.
+
+%runscript
+    exec python /opt/scripts/clustering_offline.py "$@"
+
+%labels
+    Author Jacob-Junqi
+    Version 1.0

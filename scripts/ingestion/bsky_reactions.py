@@ -232,7 +232,7 @@ async def main() -> None:
     """Ingest Bluesky reactions (likes, reposts) into S3 dataset."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-name", default="reactions")
-    parser.add_argument("--chunk-size", type=int, default=100)
+    parser.add_argument("--chunk-size", type=int, default=100000)
     parser.add_argument(
         "--duration-seconds", type=int, default=3600,
         help="Seconds to collect per batch (default: 3600 = 1 hour)"
