@@ -37,8 +37,8 @@ TEXT_COLUMN_CANDIDATES = ["claim", "statement", "text", "title"]
 
 DEFAULT_DATASETS = {
     "chai-veracity (clustered)": {
-        "path": "ComplexDataLab/chai-veracity-dry-run-20260506-clustered",
-        "split": None,
+        "path": "ComplexDataLab/chai-veracity-dry-run-20260521-dbscan-diverse",
+        "split": "train",
         "subset": None,
     },
     "fever": {
@@ -91,6 +91,7 @@ async def _judge_single(
     model_name: str,
     client: openai.AsyncOpenAI,
     semaphore: asyncio.Semaphore,
+    seed: int = 0,
 ) -> int | None:
     """Run one feasibility judgment. Returns 0/1/2 or None on failure."""
     if not text or not text.strip():
@@ -103,6 +104,7 @@ async def _judge_single(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=16384,
+                seed=seed,
             )
             output = response.choices[0].message.content
             if output is None:
@@ -266,11 +268,13 @@ async def _judge_dataset(
     all_tasks = []
     for run_idx in range(n_judge_runs):
         for ex_idx, text in enumerate(texts):
-            all_tasks.append((
-                run_idx,
-                ex_idx,
-                _judge_single(text, model_name, client, semaphore),
-            ))
+            all_tasks.append(
+                (
+                    run_idx,
+                    ex_idx,
+                    _judge_single(text, model_name, client, semaphore, seed=ex_idx),
+                )
+            )
 
     judgments = await asyncio.gather(*[t[2] for t in all_tasks])
 
@@ -356,69 +360,92 @@ async def _judge_dataset(
     }
 
 
-def _plot(results: list[dict], output_dir: Path, n_judge_runs: int) -> None:
-    """Plot stacked bar chart of feasibility class distribution per dataset."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+def _compute_class_pcts(results: list[dict]) -> list[dict]:
+    """Compute per-class percentages from results, counting failed (None)
+    judgments as class 0. Returns list of dicts with keys pct_0, pct_1, pct_2.
+    """
+    out = []
+    for r in results:
+        total_attempts = r["total_judged"] + r["total_failed"]
+        out.append(
+            {
+                "dataset": r["dataset"],
+                "pct_0": (r["total_0"] + r["total_failed"]) / total_attempts * 100,
+                "pct_1": r["total_1"] / total_attempts * 100,
+                "pct_2": r["total_2"] / total_attempts * 100,
+            }
+        )
+    return out
 
-    dataset_names = [r["dataset"] for r in results]
+
+def _plot(results: list[dict], output_dir: Path) -> None:
+    """Plot stacked bar chart of feasibility class distribution per dataset.
+    Failed (None) judgments are counted as class 0. No confidence intervals.
+    """
+    plt.rcParams.update({"font.size": 18})
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    pcts = _compute_class_pcts(results)
+    dataset_names = [p["dataset"] for p in pcts]
     x = np.arange(len(dataset_names))
     width = 0.55
 
-    pct_1 = [r["pct_1_mean"] for r in results]
-    pct_2 = [r["pct_2_mean"] for r in results]
+    pct_0 = [p["pct_0"] for p in pcts]
+    pct_1 = [p["pct_1"] for p in pcts]
+    pct_2 = [p["pct_2"] for p in pcts]
+    bottom_1 = pct_0
+    bottom_2 = [a + b for a, b in zip(pct_0, pct_1)]
 
-    # Stacked bars: class 1 bottom, class 2 top
-    ax.bar(x, pct_1, width, label="Class 1 (ambiguous)", color="#7CB5EC")
-    ax.bar(x, pct_2, width, bottom=pct_1, label="Class 2 (clear)", color="#2E75B6")
-
-    # Error bars on total feasible (class 1 + 2) showing 95% CI
-    feasible_means = [r["pct_feasible_mean"] for r in results]
-    yerr_low = []
-    yerr_high = []
-    for r in results:
-        ci_low = r["pct_feasible_ci_low"]
-        ci_high = r["pct_feasible_ci_high"]
-        if ci_low is not None and ci_high is not None:
-            yerr_low.append(r["pct_feasible_mean"] - ci_low)
-            yerr_high.append(ci_high - r["pct_feasible_mean"])
-        else:
-            yerr_low.append(0)
-            yerr_high.append(0)
-
-    ax.errorbar(
-        x, feasible_means,
-        yerr=[yerr_low, yerr_high],
-        fmt="none", ecolor="black", capsize=6, capthick=1.5, linewidth=1.5,
-        label=f"95% CI (t-dist, n={n_judge_runs} runs)",
+    ax.bar(x, pct_0, width, label="Class 0 (not feasible)", color="#999999")
+    ax.bar(
+        x, pct_1, width, bottom=bottom_1, label="Class 1 (ambiguous)", color="#7CB5EC"
     )
+    ax.bar(x, pct_2, width, bottom=bottom_2, label="Class 2 (clear)", color="#2E75B6")
 
-    # Annotate percentages
-    for i, (m1, m2, mf) in enumerate(zip(pct_1, pct_2, feasible_means)):
-        if m1 is not None and m1 > 6:
-            ax.text(i, m1 / 2, f"{m1:.1f}%", ha="center", va="center",
-                    fontsize=9, fontweight="bold", color="white")
-        if m2 is not None and m2 > 6:
-            ax.text(i, m1 + m2 / 2, f"{m2:.1f}%", ha="center", va="center",
-                    fontsize=9, fontweight="bold", color="white")
-        # Feasible total above bar with CI range
-        r = results[i]
-        ci_low = r["pct_feasible_ci_low"]
-        ci_high = r["pct_feasible_ci_high"]
-        ci_str = ""
-        if ci_low is not None and ci_high is not None:
-            ci_str = f"  [{ci_low:.1f}, {ci_high:.1f}]"
-        ax.text(i, mf + 2.5, f"{mf:.1f}%{ci_str}", ha="center", va="bottom",
-                fontsize=8, fontweight="bold")
+    for i, (m0, m1, m2) in enumerate(zip(pct_0, pct_1, pct_2)):
+        if m0 > 6:
+            ax.text(
+                i,
+                m0 / 2,
+                f"{m0:.1f}%",
+                ha="center",
+                va="center",
+                fontsize=18,
+                fontweight="bold",
+                color="white",
+            )
+        if m1 > 6:
+            ax.text(
+                i,
+                bottom_1[i] + m1 / 2,
+                f"{m1:.1f}%",
+                ha="center",
+                va="center",
+                fontsize=18,
+                fontweight="bold",
+                color="white",
+            )
+        if m2 > 6:
+            ax.text(
+                i,
+                bottom_2[i] + m2 / 2,
+                f"{m2:.1f}%",
+                ha="center",
+                va="center",
+                fontsize=18,
+                fontweight="bold",
+                color="white",
+            )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(dataset_names, fontsize=10)
-    ax.set_ylabel("Percentage of examples (%)", fontsize=12)
+    ax.set_xticklabels(dataset_names)
+    ax.set_ylabel("Percentage of examples (%)")
     ax.set_title(
-        "Feasibility Distribution by Dataset\n(LLM-as-a-Judge feasibility filter)",
-        fontsize=13,
+        "Feasibility Distribution by Dataset\n(LLM-as-a-Judge feasibility filter)"
     )
-    ax.set_ylim(0, 115)
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
+    ax.set_ylim(0, 100)
+    ax.legend(loc="upper right", fontsize=14, framealpha=0.9)
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
@@ -429,6 +456,71 @@ def _plot(results: list[dict], output_dir: Path, n_judge_runs: int) -> None:
     fig.savefig(pdf_path, bbox_inches="tight")
     logger.info("Saved PDF to %s", pdf_path)
     plt.close(fig)
+
+
+def _write_latex_table(results: list[dict], output_dir: Path) -> None:
+    """Write a LaTeX table with per-class accuracy means and 95% CIs.
+    Failed (None) judgments are counted as class 0.
+    """
+    rows = []
+    for r in results:
+        per_run = r["per_run_judgments"]
+        run_pct_0: list[float] = []
+        run_pct_1: list[float] = []
+        run_pct_2: list[float] = []
+
+        for run_key in sorted(per_run.keys(), key=lambda k: int(k.split("_")[1])):
+            judgments = per_run[run_key]
+            n_total = len(judgments)
+            n_0 = sum(1 for j in judgments if j == 0 or j is None)
+            n_1 = sum(1 for j in judgments if j == 1)
+            n_2 = sum(1 for j in judgments if j == 2)
+            run_pct_0.append(n_0 / n_total * 100)
+            run_pct_1.append(n_1 / n_total * 100)
+            run_pct_2.append(n_2 / n_total * 100)
+
+        m0, _, _, c0l, c0h = _mean_ci(run_pct_0)
+        m1, _, _, c1l, c1h = _mean_ci(run_pct_1)
+        m2, _, _, c2l, c2h = _mean_ci(run_pct_2)
+
+        rows.append(
+            {
+                "dataset": r["dataset"],
+                "class_0": f"{m0:.1f} [{c0l:.1f}, {c0h:.1f}]",
+                "class_1": f"{m1:.1f} [{c1l:.1f}, {c1h:.1f}]",
+                "class_2": f"{m2:.1f} [{c2l:.1f}, {c2h:.1f}]",
+            }
+        )
+
+    lines = [
+        r"\begin{table}[h]",
+        r"\centering",
+        r"\begin{tabular}{lccc}",
+        r"\toprule",
+        r"Dataset & Class 0 (not feasible) & Class 1 (ambiguous) & Class 2 (clear) \\",
+        r"\midrule",
+    ]
+    for row in rows:
+        ds = row["dataset"].replace("_", r"\_")
+        lines.append(
+            f"  {ds} & {row['class_0']} & {row['class_1']} & {row['class_2']} \\\\"
+        )
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\caption{Per-class feasibility percentages with 95\% confidence intervals"
+            r" (t-distribution, $n=" + str(results[0]["n_judge_runs"]) + r"$ runs)."
+            r" Failed judgments are counted as class 0 (not feasible).}",
+            r"\label{tab:per-class-ci}",
+            r"\end{table}",
+        ]
+    )
+
+    tex_path = output_dir / "per_class_ci_table.tex"
+    with open(tex_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info("Saved LaTeX table to %s", tex_path)
 
 
 def _print_table(results: list[dict]) -> pd.DataFrame:
@@ -521,7 +613,24 @@ async def main():
         "--dataset-split", default=None,
         help="Single-dataset mode: optional split name",
     )
+    parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Regenerate plots and LaTeX table from existing results.json (no LLM calls)",
+    )
     args = parser.parse_args()
+
+    if args.regenerate:
+        json_path = Path(args.output_dir) / "results.json"
+        if not json_path.exists():
+            raise FileNotFoundError(f"results.json not found at {json_path}")
+        with open(json_path) as f:
+            results = json.load(f)
+        output_dir = Path(args.output_dir)
+        _plot(results, output_dir)
+        _write_latex_table(results, output_dir)
+        print(f"Regenerated plots and LaTeX table in {output_dir}/")
+        return
 
     model_name = args.model_name or os.environ["MODEL_NAME"]
 
@@ -596,7 +705,7 @@ async def main():
     logger.info("Saved JSON to %s", json_path)
 
     # Plot
-    _plot(results, output_dir, args.n_judge_runs)
+    _plot(results, output_dir)
 
     print(f"Output saved to {output_dir}/")
 
