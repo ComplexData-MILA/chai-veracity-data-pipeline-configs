@@ -6,7 +6,26 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "backoff>=2.2.1",
+    "datasets>=4.8.5",
+    "faiss-cpu>=1.13.2",
     "httpx>=0.28.1",
+    "matplotlib>=3.10.9",
     "openai>=2.30.0",
-    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@v0.1.0",
+    "openai-agents>=0.13.5",
+    "pandas>=3.0.2",
+    "pyyaml>=6.0.3",
+    "s3-data-tool @ git+https://github.com/ComplexData-MILA/data-lake-pipeline@7983135cfa8a6db14ef0c34c7139eb9b54599e54",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "tqdm>=4.67.0",
+    "trafilatura>=2.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

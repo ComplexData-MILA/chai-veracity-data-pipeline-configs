@@ -1,37 +1,25 @@
 import argparse
 import asyncio
-import re
 
 import backoff
 import openai
+import yaml
+import pydantic
+
 from s3_data_tool import Annotation, DataItem, S3DataTool
 
-with open("templates/feasibility_filter.txt") as template_file:
+with open("templates/extract_keywords.txt") as template_file:
     TEMPLATE = template_file.read()
 
 
-def _parse_verdict(output: str) -> tuple[str, int]:
-    """Extract explanation and feasibility rating from model output.
+class Output(pydantic.BaseModel):
+    """Expected output from LLM."""
 
-    The model is prompted to output: explanation | rating (0-2).
-    Parsing is lenient: the rating is the first 0, 1, or 2 found after
-    the last pipe delimiter, extracted via regex.
-    """
-    parts = output.split("|")
-    if len(parts) < 2:
-        raise ValueError(
-            f"Output missing '|' delimiter. Output: {output[:200]}"
-        )
-    explanation = "|".join(parts[:-1])
-    verdict_str = parts[-1]
-    match = re.search(r"\b([0-2])\b", verdict_str)
-    if match is None:
-        raise ValueError(
-            f"Could not parse feasibility rating from: {verdict_str[:200]}"
-        )
-    return explanation, int(match.group(1))
+    entities: list[str]
+    summary: str
 
 
+@backoff.on_exception(backoff.expo, [openai.APIConnectionError])
 async def _generate(
     item: DataItem, model_name: str, oai_client: openai.AsyncOpenAI
 ) -> Annotation:
@@ -39,32 +27,19 @@ async def _generate(
 
     This function is designed to raise exceptions eagerly.
     """
-    if len(item.data["text"].strip()) == 0:
-        return Annotation(data={"explanation": "Empty text."})
-
     prompt = TEMPLATE.format(text=item.data["text"])
     response = await oai_client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=16384,
     )
     output = response.choices[0].message.content
-    if output is None:
-        finish_reason = response.choices[0].finish_reason
-        reasoning = getattr(
-            response.choices[0].message, "reasoning_content", None
-        )
-        raise ValueError(
-            f"Model returned no content. finish_reason={finish_reason}, "
-            f"reasoning_content present: {reasoning is not None}"
-        )
+    assert output is not None
 
-    explanation, verdict_int = _parse_verdict(output)
+    output = output.removeprefix("```").removeprefix("yaml").removesuffix("```")
+    data = yaml.safe_load(output)
+    output = Output.model_validate(data)
 
-    return Annotation(
-        data={"is_feasible": verdict_int, "explanation": explanation},
-        metadata={"model_name": model_name},
-    )
+    return Annotation(data=output.model_dump(), metadata={"model_name": model_name})
 
 
 async def annotate(
@@ -91,7 +66,7 @@ async def main():
 
     async with S3DataTool().filter_for_annotation(
         name="posts",
-        annotator_name="feasibility_llm_judge_001",
+        annotator_name="keywords_001",
         base_columns=["text"],
     ) as annotator_view:
         await annotator_view.annotate(

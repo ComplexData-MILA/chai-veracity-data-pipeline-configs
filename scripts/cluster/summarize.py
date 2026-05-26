@@ -1,0 +1,279 @@
+import argparse
+import asyncio
+import logging
+import re
+from datetime import datetime
+from typing import AsyncIterator, Any
+
+import backoff
+import openai
+import yaml
+from pydantic import BaseModel
+
+from s3_data_tool import S3DataTool, DataItem
+
+logger = logging.getLogger(__name__)
+
+
+def _load_template(path: str) -> str:
+    with open(path) as f:
+        return f.read()
+
+
+class Claim(BaseModel):
+    claim: str
+    public_entities: list[str]
+    is_time_sensitive: bool
+    is_relevant: bool
+    is_specific: bool
+    post_indices: list[int]
+
+    def attribute_dict(self) -> dict[str, Any]:
+        """Return the subset of fields that describe claim attributes (flags + entities)."""
+        return {
+            k: v
+            for k, v in self.model_dump().items()
+            if k.startswith("is_") or k in ["public_entities"]
+        }
+
+
+class ClusterSummary(BaseModel):
+    claims: list[Claim]
+
+
+_CLAIM_BLOCK_RE = re.compile(
+    r'- claim:\s*"([^"]*)"\s*\n\s*post_indices:\s*\[([^\]]*)\]'
+)
+
+
+def _parse_output(output: str) -> ClusterSummary:
+    """Parse LLM output, discarding incomplete trailing entries."""
+    output = output.removeprefix("```").removeprefix("yaml").removesuffix("```").strip()
+    try:
+        data = yaml.safe_load(output)
+        return ClusterSummary.model_validate(data)
+    except Exception:
+        pass
+
+    # Fallback: regex-extract only complete claim blocks (bounded by - and ])
+    claims: list[dict[str, Any]] = []
+    for m in _CLAIM_BLOCK_RE.finditer(output):
+        claim_text = m.group(1)
+        indices_str = m.group(2)
+        try:
+            indices = [int(x.strip()) for x in indices_str.split(",") if x.strip()]
+        except ValueError:
+            continue
+        claims.append({"claim": claim_text, "post_indices": indices})
+
+    return ClusterSummary.model_validate({"claims": claims})
+
+
+@backoff.on_exception(backoff.expo, [openai.APIConnectionError])
+async def _generate(
+    texts: list[str],
+    model_name: str,
+    oai_client: openai.AsyncOpenAI,
+    max_tokens: int,
+    template: str,
+) -> ClusterSummary:
+    """Call LLM to extract claims from a cluster. Raises on failure."""
+    numbered = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(texts))
+    prompt = template.format(posts=numbered)
+    response = await oai_client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_completion_tokens=max_tokens,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    output = response.choices[0].message.content
+    assert output is not None
+
+    return _parse_output(output)
+
+
+async def _summarize_with_retries(
+    texts: list[str],
+    model_name: str,
+    oai_client: openai.AsyncOpenAI,
+    max_retries: int,
+    max_tokens: int,
+    template: str,
+) -> ClusterSummary:
+    exceptions = []
+    for _ in range(max_retries):
+        try:
+            return await _generate(
+                texts,
+                model_name=model_name,
+                oai_client=oai_client,
+                max_tokens=max_tokens,
+                template=template,
+            )
+        except Exception as e:
+            exceptions.append(e)
+    raise RuntimeError(exceptions)
+
+
+async def _get_topic_iterator(
+    model_name: str,
+    oai_client: openai.AsyncOpenAI,
+    max_concurrency: int,
+    max_retries: int,
+    max_tokens: int,
+    max_texts_per_cluster: int,
+    max_claims_per_cluster: int,
+    template: str,
+    batch_filter: str | None = None,
+    input_dataset: str = "posts_clustered_004",
+    text_column: str = "text",
+    copy_columns: list[str] | None = None,
+    max_clusters: int | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Stream clusters, summarize each, yield one row per topic."""
+    if copy_columns is None:
+        copy_columns = []
+
+    sem = asyncio.Semaphore(max_concurrency)
+
+    _DATE_RE = re.compile(r"(\d{8})")
+
+    async def _process(item: DataItem) -> list[dict[str, Any]]:
+        try:
+            return await _process_inner(item)
+        except Exception:
+            logger.exception("Skipping cluster %s due to error", item.id)
+            return []
+
+    async def _process_inner(item: DataItem) -> list[dict[str, Any]]:
+        texts = item.data.get(text_column, [])
+        if not texts:
+            return []
+
+        date_match = _DATE_RE.search(item.batch)
+        date_str = date_match.group(1) if date_match else ""
+
+        prompt_texts = texts[:max_texts_per_cluster]
+        async with sem:
+            result = await _summarize_with_retries(
+                prompt_texts, model_name, oai_client, max_retries, max_tokens, template
+            )
+
+        rows: list[dict[str, Any]] = []
+        claims_sorted = sorted(
+            result.claims[:max_claims_per_cluster], key=lambda x: len(x.post_indices)
+        )
+        for claim in claims_sorted:
+            claim_texts = [texts[i] for i in claim.post_indices if i < len(texts)]
+            row: dict[str, Any] = {
+                "cluster_id": item.id,
+                "claim": claim.claim,
+                "post_count": len(claim_texts),
+                "original_texts": claim_texts,
+                "date": date_str,
+                **claim.attribute_dict(),
+            }
+            for col in copy_columns:
+                col_data = item.data.get(col, [])
+                row[col] = [
+                    col_data[i] for i in claim.post_indices if i < len(col_data)
+                ]
+            rows.append(row)
+        return rows
+
+    async with S3DataTool().filter_for_export(
+        name=input_dataset,
+        base_columns=[text_column] + list(copy_columns),
+    ) as generator:
+        tasks = []
+        cluster_count = 0
+        async for item in generator:
+            if batch_filter and item.batch != batch_filter:
+                continue
+            if max_clusters is not None and cluster_count >= max_clusters:
+                break
+            tasks.append(asyncio.create_task(_process(item)))
+            cluster_count += 1
+
+        for task in asyncio.as_completed(tasks):
+            for row in await task:
+                yield row
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", required=True)
+    parser.add_argument("--max_concurrency", type=int, default=16)
+    parser.add_argument("--max_retries", type=int, default=6)
+    parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
+    parser.add_argument("--max_tokens", type=int, default=1024)
+    parser.add_argument("--max-texts-per-cluster", type=int, default=50)
+    parser.add_argument("--max-claims-per-cluster", type=int, default=5)
+    parser.add_argument(
+        "--batch",
+        default=None,
+        help="Summarize only clusters from this batch name (e.g. x-posts-clusters-20260507).",
+    )
+    parser.add_argument(
+        "--input-dataset",
+        default="posts_clustered_004",
+        help="Dataset to read clusters from (default: posts_clustered_004).",
+    )
+    parser.add_argument(
+        "--template",
+        default="templates/summarize_cluster.txt",
+        help="Path to prompt template file (default: templates/summarize_cluster.txt).",
+    )
+    parser.add_argument(
+        "--text-column",
+        default="text",
+        help="Column name for the texts list (default: text).",
+    )
+    parser.add_argument(
+        "--copy-columns",
+        default="original_ids",
+        help="Column names to copy into output (default: original_ids), comma-separated.",
+    )
+    parser.add_argument(
+        "--max-clusters",
+        type=int,
+        default=None,
+        help="Stop after processing this many clusters (default: no limit).",
+    )
+    args = parser.parse_args()
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H")
+    batch_name = f"bsky-summarize-{timestamp}"
+
+    template = _load_template(args.template)
+    oai_client = openai.AsyncOpenAI()
+
+    async with S3DataTool().dataset_generator() as dataset_generator:
+        await dataset_generator.from_async_iterator(
+            _get_topic_iterator(
+                model_name=args.model_name,
+                oai_client=oai_client,
+                max_concurrency=args.max_concurrency,
+                max_retries=args.max_retries,
+                max_tokens=args.max_tokens,
+                max_texts_per_cluster=args.max_texts_per_cluster,
+                max_claims_per_cluster=args.max_claims_per_cluster,
+                template=template,
+                batch_filter=args.batch,
+                input_dataset=args.input_dataset,
+                text_column=args.text_column,
+                copy_columns=args.copy_columns.split(","),
+                max_clusters=args.max_clusters,
+            ),
+            name=args.dataset_name,
+            batch=batch_name,
+            streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10),
+            deduplicate_on=["cluster_id", "claim"],
+        )
+
+    logger.info("Done.")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())

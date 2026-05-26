@@ -1,0 +1,15 @@
+You are evaluating clusters of social media posts grouped by embedding similarity. Each cluster was formed automatically by a kNN-graph algorithm based on semantic embeddings. Some clusters represent a coherent topic; others are noise — posts that happen to have similar embeddings but don't share a meaningful subject.
+
+Below are the posts in a cluster. Judge whether these posts share a single coherent topic.
+
+Posts:
+{posts}
+
+A "coherent topic" means the posts all discuss the same subject, event, person, or theme. Minor variations in phrasing or perspective are fine as long as a human would say "these are about the same thing."
+
+"Noise/unrelated" means the posts don't share a meaningful topic — they may share superficial words or sentiments but aren't about the same subject. A cluster of generic statements ("I'm so tired", "What a day", "Can't believe it") without a shared subject is noise.
+
+Output format: a brief explanation, then a vertical bar "|", followed by your rating as a single digit:
+
+1 = coherent topic (posts are about the same thing)
+0 = noise/unrelated (posts don't share a meaningful topic)

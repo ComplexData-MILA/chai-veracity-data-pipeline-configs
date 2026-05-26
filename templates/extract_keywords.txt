@@ -1,0 +1,12 @@
+Identify and extract named entities from this statement, and rephrase this statement in easy-to-read English in no more than one paragraph. 
+
+{text}
+
+Produce a YAML codeblock as output. Example format:
+
+```yaml
+entities:
+  - "..."
+summary: "..."
+
+```
