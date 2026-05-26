@@ -27,6 +27,7 @@ dependencies = [
     { name = "s3-data-tool" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "tqdm" },
     { name = "trafilatura" },
 ]
 
@@ -49,6 +50,7 @@ requires-dist = [
     { name = "s3-data-tool", git = "https://github.com/ComplexData-MILA/data-lake-pipeline?rev=7983135cfa8a6db14ef0c34c7139eb9b54599e54" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.17.1" },
+    { name = "tqdm", specifier = ">=4.67.0" },
     { name = "trafilatura", specifier = ">=2.0.0" },
 ]
 

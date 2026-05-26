@@ -207,8 +207,8 @@ async def main():
     parser.add_argument("--max_retries", type=int, default=6)
     parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
     parser.add_argument("--max_tokens", type=int, default=1024)
-    parser.add_argument("--max-texts-per-cluster", type=int, default=32)
-    parser.add_argument("--max-claims-per-cluster", type=int, default=10)
+    parser.add_argument("--max-texts-per-cluster", type=int, default=50)
+    parser.add_argument("--max-claims-per-cluster", type=int, default=5)
     parser.add_argument(
         "--batch",
         default=None,

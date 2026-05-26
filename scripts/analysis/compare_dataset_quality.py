@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import openai
 import pandas as pd
+from tqdm import tqdm
 import pyarrow.parquet as pq
 from datasets import load_dataset
 from datasets.exceptions import DatasetGenerationError
@@ -92,10 +93,10 @@ async def _judge_single(
     client: openai.AsyncOpenAI,
     semaphore: asyncio.Semaphore,
     seed: int = 0,
-) -> int | None:
-    """Run one feasibility judgment. Returns 0/1/2 or None on failure."""
+) -> tuple[int | None, str | None]:
+    """Run one feasibility judgment. Returns (verdict, raw_output) or (None, None) on failure."""
     if not text or not text.strip():
-        return None
+        return None, None
 
     prompt = TEMPLATE.format(text=text)
     async with semaphore:
@@ -108,11 +109,11 @@ async def _judge_single(
             )
             output = response.choices[0].message.content
             if output is None:
-                return None
+                return None, None
             _, verdict = _parse_verdict(output)
-            return verdict
+            return verdict, output
         except Exception:
-            return None
+            return None, None
 
 
 def _mean_ci(values: list[float]) -> tuple[float, float, float, float, float]:
@@ -276,14 +277,24 @@ async def _judge_dataset(
                 )
             )
 
-    judgments = await asyncio.gather(*[t[2] for t in all_tasks])
+    pbar = tqdm(total=total_calls, desc=f"  {name}", unit="call")
 
-    # Group judgments by run
+    async def _tracked(coro):
+        result = await coro
+        pbar.update(1)
+        return result
+
+    judgments = await asyncio.gather(*[_tracked(t[2]) for t in all_tasks])
+    pbar.close()
+
+    # Group judgments and raw outputs by run
     per_run: dict[int, list[int | None]] = {
         i: [] for i in range(n_judge_runs)
     }
-    for (run_idx, ex_idx, _), judgment in zip(all_tasks, judgments):
-        per_run[run_idx].append(judgment)
+    per_run_raw: dict[int, list[str | None]] = {i: [] for i in range(n_judge_runs)}
+    for (run_idx, ex_idx, _), (verdict, raw_output) in zip(all_tasks, judgments):
+        per_run[run_idx].append(verdict)
+        per_run_raw[run_idx].append(raw_output)
 
     # Compute per-run class percentages
     run_pct_0: list[float] = []
@@ -354,8 +365,11 @@ async def _judge_dataset(
         "run_pct_2": [_r(v) for v in run_pct_2],
         "run_pct_feasible": [_r(v) for v in run_pct_feasible],
         # Per-run judgments (for reproducibility)
-        "per_run_judgments": {
-            f"run_{i}": per_run[i] for i in range(n_judge_runs)
+        "per_run_judgments": {f"run_{i}": per_run[i] for i in range(n_judge_runs)},
+        # Input texts and raw LLM outputs
+        "texts": texts,
+        "per_run_raw_outputs": {
+            f"run_{i}": per_run_raw[i] for i in range(n_judge_runs)
         },
     }
 
@@ -380,7 +394,9 @@ def _compute_class_pcts(results: list[dict]) -> list[dict]:
 
 def _plot(results: list[dict], output_dir: Path) -> None:
     """Plot stacked bar chart of feasibility class distribution per dataset.
-    Failed (None) judgments are counted as class 0. No confidence intervals.
+    Failed (None) judgments are counted as class 0.
+    Stacked from bottom to top: class 2, class 1, class 0.
+    CI error bars shown for class 2.
     """
     plt.rcParams.update({"font.size": 18})
 
@@ -394,21 +410,59 @@ def _plot(results: list[dict], output_dir: Path) -> None:
     pct_0 = [p["pct_0"] for p in pcts]
     pct_1 = [p["pct_1"] for p in pcts]
     pct_2 = [p["pct_2"] for p in pcts]
-    bottom_1 = pct_0
-    bottom_2 = [a + b for a, b in zip(pct_0, pct_1)]
 
-    ax.bar(x, pct_0, width, label="Class 0 (not feasible)", color="#999999")
+    # Stack order (bottom to top): class 2, class 1, class 0
+    bottom_1 = pct_2
+    bottom_0 = [a + b for a, b in zip(pct_2, pct_1)]
+
+    # Compute per-run CI for class 2 (None counted as class 0)
+    pct_2_ci_low = []
+    pct_2_ci_high = []
+    for r in results:
+        per_run = r["per_run_judgments"]
+        run_pct_2 = []
+        for run_key in sorted(per_run.keys(), key=lambda k: int(k.split("_")[1])):
+            judgments = per_run[run_key]
+            n_total = len(judgments)
+            n_2 = sum(1 for j in judgments if j == 2)
+            run_pct_2.append(n_2 / n_total * 100)
+        _, _, _, ci_low, ci_high = _mean_ci(run_pct_2)
+        pct_2_ci_low.append(ci_low)
+        pct_2_ci_high.append(ci_high)
+
+    pct_2_err_low = [p2 - cl for p2, cl in zip(pct_2, pct_2_ci_low)]
+    pct_2_err_high = [ch - p2 for p2, ch in zip(pct_2, pct_2_ci_high)]
+
+    ax.bar(x, pct_2, width, label="Class 2 (clear)", color="#2E75B6")
     ax.bar(
         x, pct_1, width, bottom=bottom_1, label="Class 1 (ambiguous)", color="#7CB5EC"
     )
-    ax.bar(x, pct_2, width, bottom=bottom_2, label="Class 2 (clear)", color="#2E75B6")
+    ax.bar(
+        x,
+        pct_0,
+        width,
+        bottom=bottom_0,
+        label="Class 0 (not feasible)",
+        color="#999999",
+    )
+
+    ax.errorbar(
+        x,
+        pct_2,
+        yerr=[pct_2_err_low, pct_2_err_high],
+        fmt="none",
+        ecolor="black",
+        capsize=5,
+        capthick=1.5,
+        linewidth=1.5,
+    )
 
     for i, (m0, m1, m2) in enumerate(zip(pct_0, pct_1, pct_2)):
-        if m0 > 6:
+        if m2 > 6:
             ax.text(
                 i,
-                m0 / 2,
-                f"{m0:.1f}%",
+                m2 / 2,
+                f"{m2:.1f}%",
                 ha="center",
                 va="center",
                 fontsize=18,
@@ -426,11 +480,11 @@ def _plot(results: list[dict], output_dir: Path) -> None:
                 fontweight="bold",
                 color="white",
             )
-        if m2 > 6:
+        if m0 > 6:
             ax.text(
                 i,
-                bottom_2[i] + m2 / 2,
-                f"{m2:.1f}%",
+                bottom_0[i] + m0 / 2,
+                f"{m0:.1f}%",
                 ha="center",
                 va="center",
                 fontsize=18,
@@ -445,7 +499,14 @@ def _plot(results: list[dict], output_dir: Path) -> None:
         "Feasibility Distribution by Dataset\n(LLM-as-a-Judge feasibility filter)"
     )
     ax.set_ylim(0, 100)
-    ax.legend(loc="upper right", fontsize=14, framealpha=0.9)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles[::-1],
+        labels[::-1],
+        loc="upper right",
+        fontsize=14,
+        framealpha=0.9,
+    )
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
@@ -509,9 +570,7 @@ def _write_latex_table(results: list[dict], output_dir: Path) -> None:
         [
             r"\bottomrule",
             r"\end{tabular}",
-            r"\caption{Per-class feasibility percentages with 95\% confidence intervals"
-            r" (t-distribution, $n=" + str(results[0]["n_judge_runs"]) + r"$ runs)."
-            r" Failed judgments are counted as class 0 (not feasible).}",
+            r"\caption{Example claims and LLM-as-a-Judge feasibility outputs for each label and dataset. Claims are shown in regular typeface; raw model outputs in typewriter font. LLM-Judge: Qwen3.5-9B, no tool use, max. 16,384 output tokens (including reasoning tokens.) See Appendix~\ref{app:feasibility-prompt} for the exact instructions.}",
             r"\label{tab:per-class-ci}",
             r"\end{table}",
         ]
@@ -521,6 +580,128 @@ def _write_latex_table(results: list[dict], output_dir: Path) -> None:
     with open(tex_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     logger.info("Saved LaTeX table to %s", tex_path)
+
+
+def _escape_latex(text: str) -> str:
+    """Escape special characters for LaTeX."""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "$": r"\$",
+        "&": r"\&",
+        "#": r"\#",
+        "^": r"\^{}",
+        "_": r"\_",
+        "~": r"\textasciitilde{}",
+        "%": r"\%",
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    return text
+
+
+def _write_appendix_table(results: list[dict], output_dir: Path) -> None:
+    """Write a full-page LaTeX longtable with example claims and raw LLM outputs.
+
+    For each label (0, 1, 2) and each dataset, up to 5 claims are shown
+    with their raw LLM-as-a-Judge output from run_0.
+    """
+    label_names = {0: "Not Feasible", 1: "Ambiguous", 2: "Clear"}
+
+    lines = [
+        r"\begin{longtable}{p{\textwidth}}",
+        r"\caption{Example claims and LLM-as-a-Judge feasibility outputs for each"
+        r" label and dataset. Claims are shown in regular typeface; raw model"
+        r" outputs in typewriter font.}",
+        r"\label{tab:appendix-claim-examples} \\",
+        r"\toprule",
+        r"\endfirsthead",
+        r"\multicolumn{1}{c}{\textit{continued from previous page}} \\",
+        r"\toprule",
+        r"\endhead",
+        r"\bottomrule",
+        r"\endfoot",
+    ]
+
+    for label in [2, 1, 0]:
+        lines.append(r"\midrule")
+        lines.append(
+            r"\multicolumn{1}{c}{\textbf{Label "
+            + str(label)
+            + r" --- "
+            + label_names[label]
+            + r"}} \\"
+        )
+        lines.append(r"\midrule")
+
+        for ds_result in results:
+            dataset_name = _escape_latex(ds_result["dataset"])
+            texts = ds_result["texts"]
+            per_run_judgments = ds_result["per_run_judgments"]
+            per_run_raw = ds_result["per_run_raw_outputs"]
+            run_keys = sorted(
+                per_run_judgments.keys(), key=lambda k: int(k.split("_")[1])
+            )
+
+            # Collect up to 5 (example_idx, run_key) pairs, trying run_0 first
+            collected: list[tuple[int, str]] = []
+            seen_indices: set[int] = set()
+            for run_key in run_keys:
+                if len(collected) >= 5:
+                    break
+                for i, j in enumerate(per_run_judgments[run_key]):
+                    if len(collected) >= 5:
+                        break
+                    if j == label and i not in seen_indices:
+                        collected.append((i, run_key))
+                        seen_indices.add(i)
+
+            if not collected:
+                continue
+
+            lines.append(
+                r"\textbf{"
+                + dataset_name
+                + r"} "
+                + f"- label {label} ({label_names[label]})"
+                + r"\\"
+            )
+            lines.append(r"\midrule")
+
+            for idx, (example_idx, run_key) in enumerate(collected):
+                claim = _escape_latex(texts[example_idx].strip())
+                raw = per_run_raw[run_key][example_idx].strip()
+                run_num = run_key.split("_")[1]
+
+                try:
+                    explanation, verdict = _parse_verdict(raw)
+                except ValueError:
+                    explanation, verdict = raw, None
+
+                explanation = " \\newline ".join(
+                    _escape_latex(segment)
+                    for segment in explanation.strip().split("\n")
+                    if segment.strip()
+                )
+
+                lines.append(f"\\textit{{Claim:}} {claim} \\\\")
+                lines.append(f"\\quad {{\\ttfamily\\small {explanation}}} \\\\")
+                run_note = f" (run\\_{run_num})" if run_num != "0" else ""
+
+                lines.append(r"\hline\addlinespace")
+
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{longtable}",
+        ]
+    )
+
+    tex_path = output_dir / "appendix_claim_examples.tex"
+    with open(tex_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info("Saved appendix LaTeX table to %s", tex_path)
 
 
 def _print_table(results: list[dict]) -> pd.DataFrame:
@@ -629,7 +810,8 @@ async def main():
         output_dir = Path(args.output_dir)
         _plot(results, output_dir)
         _write_latex_table(results, output_dir)
-        print(f"Regenerated plots and LaTeX table in {output_dir}/")
+        _write_appendix_table(results, output_dir)
+        print(f"Regenerated plots and LaTeX tables in {output_dir}/")
         return
 
     model_name = args.model_name or os.environ["MODEL_NAME"]
@@ -659,6 +841,8 @@ async def main():
     dataset_texts = _load_datasets(datasets_config, args.n_samples, args.seed)
 
     # LLM client
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
     client = openai.AsyncOpenAI()
     semaphore = asyncio.Semaphore(args.max_concurrency)
 
@@ -669,7 +853,7 @@ async def main():
 
     # Judge each dataset
     results = []
-    for name, texts in dataset_texts.items():
+    for name, texts in tqdm(dataset_texts.items(), desc="Datasets", unit="dataset"):
         logger.info("=== Dataset: %s ===", name)
         result = await _judge_dataset(
             name=name,
@@ -706,6 +890,10 @@ async def main():
 
     # Plot
     _plot(results, output_dir)
+
+    # LaTeX tables
+    _write_latex_table(results, output_dir)
+    _write_appendix_table(results, output_dir)
 
     print(f"Output saved to {output_dir}/")
 

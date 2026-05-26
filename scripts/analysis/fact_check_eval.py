@@ -12,8 +12,7 @@ Usage:
         --n-samples 5 --n-runs 3 --max-concurrency 4
 
     # Full run with defaults
-    uv run --env-file .openai.env python scripts/analysis/fact_check_eval.py \\
-        --model-name gpt-5.1-nano
+    uv run --env-file .openai.env python scripts/analysis/fact_check_eval.py
 """
 
 import argparse
@@ -31,6 +30,7 @@ import numpy as np
 import openai
 import pandas as pd
 import pydantic
+import tqdm
 from datasets import Dataset, load_dataset
 from datasets.exceptions import DatasetGenerationError
 from huggingface_hub import hf_hub_download, list_repo_tree
@@ -163,6 +163,16 @@ def _mean_ci(values: list[float]) -> tuple[float, float, float, float, float]:
         ci_low = float("nan")
         ci_high = float("nan")
     return mean, std, sem, ci_low, ci_high
+
+
+def _wrap_with_progress(coro, pbar):
+    """Await *coro* and tick *pbar* on completion, preserving result/exception."""
+    async def _inner():
+        try:
+            return await coro
+        finally:
+            pbar.update(1)
+    return _inner()
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +368,16 @@ async def _run_search_phase(
                 _run_search_agent(text, run_config, semaphore),
             ))
 
-    results = await asyncio.gather(*[t[2] for t in all_tasks])
+    pbar = tqdm.tqdm(
+        total=total_calls,
+        desc="  Phase A (web-search)",
+        unit="call",
+        ncols=100,
+    )
+    results = await asyncio.gather(
+        *[_wrap_with_progress(t[2], pbar) for t in all_tasks]
+    )
+    pbar.close()
 
     # Group by example
     per_example: list[list[int | None]] = [[] for _ in range(n_examples)]
@@ -502,7 +521,16 @@ async def _run_no_search_phase(
                 _run_no_search_llm(text, model_name, client, semaphore),
             ))
 
-    results = await asyncio.gather(*[t[2] for t in all_tasks])
+    pbar = tqdm.tqdm(
+        total=total_calls,
+        desc="  Phase B (no-search)",
+        unit="call",
+        ncols=100,
+    )
+    results = await asyncio.gather(
+        *[_wrap_with_progress(t[2], pbar) for t in all_tasks]
+    )
+    pbar.close()
 
     # Group by example
     per_example_details: list[list[dict]] = [[] for _ in range(n_examples)]
@@ -595,6 +623,22 @@ def _evaluate(
     flip_rates_pct = [r * 100 for r in per_example_flip_rates]
     flip_mean, flip_std, flip_sem, flip_ci_low, flip_ci_high = _mean_ci(flip_rates_pct)
 
+    # Per-agent class distribution: true% for search and no-search agents
+    def _per_example_true_rates(details: list[list[dict]]) -> list[float]:
+        rates: list[float] = []
+        for ex_details in details:
+            valid = [d for d in ex_details if d["validity"] is not None]
+            if valid:
+                n_true = sum(1 for d in valid if d["validity"] == 1)
+                rates.append(n_true / len(valid) * 100)
+        return rates
+
+    search_true_rates = _per_example_true_rates(search_details)
+    no_search_true_rates = _per_example_true_rates(no_search_details)
+
+    s_true_mean, _, _, s_true_ci_low, s_true_ci_high = _mean_ci(search_true_rates)
+    ns_true_mean, _, _, ns_true_ci_low, ns_true_ci_high = _mean_ci(no_search_true_rates)
+
     def _r(v):
         return round(v, 2) if not math.isnan(v) else None
 
@@ -611,6 +655,12 @@ def _evaluate(
         "flip_rate_ci_low": _r(flip_ci_low),
         "flip_rate_ci_high": _r(flip_ci_high),
         "per_example_flip_rates_pct": [_r(v) for v in flip_rates_pct],
+        "search_true_rate_mean": _r(s_true_mean),
+        "search_true_rate_ci_low": _r(s_true_ci_low),
+        "search_true_rate_ci_high": _r(s_true_ci_high),
+        "no_search_true_rate_mean": _r(ns_true_mean),
+        "no_search_true_rate_ci_low": _r(ns_true_ci_low),
+        "no_search_true_rate_ci_high": _r(ns_true_ci_high),
     }
 
 
@@ -682,11 +732,7 @@ def _plot(results: list[dict], n_runs: int, output_dir: Path) -> None:
     ax.set_yticks(y)
     ax.set_yticklabels(dataset_names)
     ax.set_xlabel("Flip Rate (%)")
-    ax.set_title(
-        f"Verdict Flips: Web-Search Agent vs No-Search\n"
-        f"(95% CI, t-distribution, {n_runs} rollouts per claim.)"
-    )
-    ax.set_xlim(0, max(115, max(flip_means) + 20 if flip_means else 100))
+    ax.set_xlim(0, 100)
     # ax.legend(loc="lower right", fontsize=14, framealpha=0.9)
     ax.grid(axis="x", alpha=0.3)
 
@@ -704,40 +750,39 @@ def _plot(results: list[dict], n_runs: int, output_dir: Path) -> None:
 
 
 def _plot_search_calls(results: list[dict], n_runs: int, output_dir: Path) -> None:
-    """Horizontal bar chart: one bar per dataset showing avg web-search tool calls per run with 95% t-distribution CI."""
+    """Vertical bar chart: one bar per dataset showing avg web-search tool calls per run with 95% t-distribution CI."""
     plt.rcParams.update({"font.size": 18})
 
     fig, ax = plt.subplots(figsize=(9, 6))
 
     dataset_names = [r["dataset"] for r in results]
     n_datasets = len(dataset_names)
-    y = np.arange(n_datasets)
-    height = 0.5
+    x = np.arange(n_datasets)
+    width = 0.5
 
     search_means = [r.get("avg_search_calls", 0) or 0 for r in results]
-    xerr_low = []
-    xerr_high = []
+    yerr_low = []
+    yerr_high = []
     for r in results:
         ci_low = r.get("search_calls_ci_low")
         ci_high = r.get("search_calls_ci_high")
         mean = r.get("avg_search_calls")
         if ci_low is not None and ci_high is not None and mean is not None:
-            xerr_low.append(mean - ci_low)
-            xerr_high.append(ci_high - mean)
+            yerr_low.append(mean - ci_low)
+            yerr_high.append(ci_high - mean)
         else:
-            xerr_low.append(0)
-            xerr_high.append(0)
+            yerr_low.append(0)
+            yerr_high.append(0)
 
     colors = ["#2E75B6" if i == 0 else "#7CB5EC" for i in range(n_datasets)]
-    ax.barh(
-        y, search_means, height, color=colors, label="Avg web-search tool calls per run"
+    ax.bar(
+        x, search_means, width, color=colors, label="Avg web-search tool calls per run"
     )
-    ax.invert_yaxis()
 
     ax.errorbar(
+        x,
         search_means,
-        y,
-        xerr=[xerr_low, xerr_high],
+        yerr=[yerr_low, yerr_high],
         fmt="none",
         ecolor="black",
         capsize=8,
@@ -755,26 +800,22 @@ def _plot_search_calls(results: list[dict], n_runs: int, output_dir: Path) -> No
             if ci_low is not None and ci_high is not None:
                 ci_str = f"\n[{ci_low:.1f}, {ci_high:.1f}]"
             ax.text(
+                x[i],
                 mean + 0.05,
-                y[i],
                 f"{mean:.1f}{ci_str}",
-                ha="left",
-                va="center",
+                ha="center",
+                va="bottom",
                 fontsize=18,
                 fontweight="bold",
             )
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(dataset_names)
-    ax.set_xlabel("Number of Web-Search Tool Calls per claim")
-    ax.set_title(
-        "Average Web-Search Tool Calls per Claim\n"
-        f"(95% CI, t-distribution, {n_runs} rollouts per claim.)"
-    )
-    xmax = (max(search_means) or 0) + 1.5 if search_means else 5
-    ax.set_xlim(0, xmax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(dataset_names)
+    ax.set_ylabel("Number of Web-Search Tool Calls per claim")
+    ymax = (max(search_means) or 0) + 1.5 if search_means else 5
+    ax.set_ylim(0, ymax)
     # ax.legend(loc="lower right", fontsize=14, framealpha=0.9)
-    ax.grid(axis="x", alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
 
@@ -789,9 +830,411 @@ def _plot_search_calls(results: list[dict], n_runs: int, output_dir: Path) -> No
     plt.close(fig)
 
 
+def _plot_class_distribution(results: list[dict], n_runs: int, output_dir: Path) -> None:
+    """Grouped bar chart: per dataset, two bars showing true% for no-search and web-search agents."""
+    plt.rcParams.update({"font.size": 18})
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    dataset_names = [r["dataset"] for r in results]
+    n_datasets = len(dataset_names)
+    x = np.arange(n_datasets)
+    bar_width = 0.3
+
+    dark_grey = "#666666"
+    light_grey = "#BBBBBB"
+    dark_blue = "#2E75B6"
+    light_blue = "#7CB5EC"
+
+    search_true_means = [r.get("search_true_rate_mean") or 0 for r in results]
+    no_search_true_means = [r.get("no_search_true_rate_mean") or 0 for r in results]
+
+    # No-search bars (left in each group) — grey
+    ax.bar(
+        x[0] - bar_width / 2, no_search_true_means[0], bar_width,
+        color=dark_grey, label="No-Search",
+    )
+    if n_datasets > 1:
+        ax.bar(
+            x[1:] - bar_width / 2, no_search_true_means[1:], bar_width,
+            color=light_grey,
+        )
+
+    # Web-search bars (right in each group) — blue
+    ax.bar(
+        x[0] + bar_width / 2, search_true_means[0], bar_width,
+        color=dark_blue, label="Web-Search",
+    )
+    if n_datasets > 1:
+        ax.bar(
+            x[1:] + bar_width / 2, search_true_means[1:], bar_width,
+            color=light_blue,
+        )
+
+    # CI error bars
+    for i, r in enumerate(results):
+        for offset, mean_key, ci_low_key, ci_high_key in [
+            (-bar_width / 2, "no_search_true_rate_mean", "no_search_true_rate_ci_low", "no_search_true_rate_ci_high"),
+            (+bar_width / 2, "search_true_rate_mean", "search_true_rate_ci_low", "search_true_rate_ci_high"),
+        ]:
+            mean = r.get(mean_key)
+            ci_low = r.get(ci_low_key)
+            ci_high = r.get(ci_high_key)
+            if mean is not None and ci_low is not None and ci_high is not None:
+                ax.errorbar(
+                    x[i] + offset, mean,
+                    yerr=[[mean - ci_low], [ci_high - mean]],
+                    fmt="none", ecolor="black", capsize=6, capthick=1.5, linewidth=1.5,
+                )
+
+    # Annotate true% above each bar
+    for i, r in enumerate(results):
+        ns_mean = r.get("no_search_true_rate_mean")
+        s_mean = r.get("search_true_rate_mean")
+        ns_off = 1.5
+        s_off = 1.5
+        if ns_mean is not None and s_mean is not None and abs(ns_mean - s_mean) < 10:
+            # Stagger labels so they don't overlap
+            if ns_mean >= s_mean:
+                ns_off += 8
+            else:
+                s_off += 8
+        if ns_mean is not None:
+            ax.text(
+                x[i] - bar_width / 2, ns_mean + ns_off, f"{ns_mean:.1f}%",
+                ha="center", va="bottom", fontsize=18, fontweight="bold",
+            )
+        if s_mean is not None:
+            ax.text(
+                x[i] + bar_width / 2, s_mean + s_off, f"{s_mean:.1f}%",
+                ha="center", va="bottom", fontsize=18, fontweight="bold",
+            )
+
+    ax.legend(loc="upper right", fontsize=18, framealpha=0.9)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(dataset_names)
+    ax.set_ylabel("True Rate (%)")
+    ax.set_ylim(0, 100)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+
+    png_path = output_dir / "class_distribution.png"
+    fig.savefig(png_path, dpi=150)
+    logger.info("Saved plot to %s", png_path)
+
+    pdf_path = output_dir / "class_distribution.pdf"
+    fig.savefig(pdf_path)
+    logger.info("Saved plot to %s", pdf_path)
+
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Flip-category LaTeX table
+# ---------------------------------------------------------------------------
+
+
+def _escape_latex(text: str) -> str:
+    """Escape special characters for LaTeX."""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "$": r"\$",
+        "&": r"\&",
+        "#": r"\#",
+        "^": r"\^{}",
+        "_": r"\_",
+        "~": r"\textasciitilde{}",
+        "%": r"\%",
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    return text
+
+
+def _escape_latex_with_links(text: str) -> str:
+    """Escape LaTeX special chars, converting markdown [text](url) to \\href."""
+    links: list[tuple[str, str]] = []
+
+    def _collect(match: re.Match) -> str:
+        links.append((match.group(1), match.group(2)))
+        return f"\x00MARKDOWN_LINK_{len(links) - 1}\x00"
+
+    text = re.sub(r"\[([^\]]*)\]\(([^)]*)\)", _collect, text)
+    text = _escape_latex(text)
+    for i, (link_text, url) in enumerate(links):
+        escaped_text = _escape_latex(link_text)
+        placeholder = _escape_latex(f"\x00MARKDOWN_LINK_{i}\x00")
+        text = text.replace(placeholder, f"\\href{{{url}}}{{{escaped_text}}}")
+    return text
+
+
+def _write_latex_flip_table(results: list[dict], output_dir: Path) -> None:
+    """Write a LaTeX table with flip-category percentages and 95% CIs.
+
+    Categories: no-search verdict -> web-search verdict
+      F->F, F->T, T->F, T->T
+    Each cell shows: mean [CI_low, CI_high].
+    """
+    lines = [
+        r"\begin{table}[h]",
+        r"\centering",
+        r"\begin{tabular}{lcccc}",
+        r"\toprule",
+        r"Dataset & F $\to$ F & F $\to$ T & T $\to$ F & T $\to$ T \\",
+        r"\midrule",
+    ]
+
+    for r in results:
+        ds = r["dataset"].replace("_", r"\_")
+        cells = []
+        for cat in ["ff", "ft", "tf", "tt"]:
+            mean = r.get(f"{cat}_mean")
+            ci_low = r.get(f"{cat}_ci_low")
+            ci_high = r.get(f"{cat}_ci_high")
+            if mean is not None and ci_low is not None and ci_high is not None:
+                cells.append(f"{mean:.1f} [{ci_low:.1f}, {ci_high:.1f}]")
+            else:
+                cells.append("--")
+        lines.append(
+            f"  {ds} & {cells[0]} & {cells[1]} & {cells[2]} & {cells[3]} \\\\"
+        )
+
+    n_runs = results[0]["n_runs"] if results else "?"
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\caption{Per-example mean flip-category percentages with 95\% confidence"
+        r" intervals (t-distribution, $n=" + str(n_runs) + r"$ runs per example)."
+        r" Categories show the no-search $\to$ web-search verdict transition.}",
+        r"\label{tab:flip-categories}",
+        r"\end{table}",
+    ])
+
+    tex_path = output_dir / "flip_categories_table.tex"
+    with open(tex_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info("Saved LaTeX table to %s", tex_path)
+
+
+def _write_appendix_flip_table(
+    flip_examples: dict[str, dict[str, list[dict]]],
+    results: list[dict],
+    output_dir: Path,
+) -> None:
+    """Write a LaTeX longtable with example claims and raw outputs per flip category.
+
+    For each verdict-transition category (F->T, T->F, F->F, T->T) and each
+    dataset, up to 5 claims are shown with their no-search and web-search
+    explanations from a representative run.
+    """
+    # Build dataset -> result lookup keyed by dataset display name
+    stats_by_dataset: dict[str, dict] = {r["dataset"]: r for r in results}
+
+    flip_names = {
+        "ft": r"False $\to$ True (flip to true with search)",
+        "tf": r"True $\to$ False (flip to false with search)",
+        "ff": r"False $\to$ False (stable false)",
+        "tt": r"True $\to$ True (stable true)",
+    }
+
+    lines = [
+        r"\begin{longtable}{p{\textwidth}}",
+        r"\caption{Example claims with no-search and web-search fact-checking outputs for each verdict-transition category and dataset. Claims are shown in regular typeface; raw model outputs in typewriter font. Both the No-search and Web-search experiment are implemented using gpt-5.4-mini and the OpenAI Python Agent SDK. Web search uses the first-party web search tool from OpenAI. Refer to Appendix~\ref{app:fact-check-prompts} for instructions for the agents. The web search agent cites its sources in the Markdown hyperlink format. These URLs have been replaced with hyper-ref links in this table. Transition probabilities are calculated based on a sample of $50$ claims from each dataset. Student's-t confidence intervals for the transition probabilities are based on $5$ independent rollouts for each claim.}",
+        r"\label{tab:appendix-flip-examples} \\",
+        r"\toprule",
+        r"\endfirsthead",
+        r"\multicolumn{1}{c}{\textit{continued from previous page}} \\",
+        r"\toprule",
+        r"\endhead",
+        r"\bottomrule",
+        r"\endfoot",
+    ]
+
+    flip_short = {
+        "ft": r"F$\to$T",
+        "tf": r"T$\to$F",
+        "ff": r"F$\to$F",
+        "tt": r"T$\to$T",
+    }
+
+    for cat in ["ft", "tf", "ff", "tt"]:
+        lines.append(r"\midrule")
+        lines.append(
+            r"\multicolumn{1}{c}{\textbf{" + flip_names[cat] + r"}} \\"
+        )
+        lines.append(r"\midrule")
+
+        for ds_name, categories in flip_examples.items():
+            examples = categories.get(cat, [])
+            if not examples:
+                continue
+
+            stats = stats_by_dataset.get(ds_name, {})
+            cat_mean = stats.get(f"{cat}_mean")
+            cat_ci_low = stats.get(f"{cat}_ci_low")
+            cat_ci_high = stats.get(f"{cat}_ci_high")
+            if cat_mean is not None and cat_ci_low is not None and cat_ci_high is not None:
+                stat_str = (
+                    f"{flip_short[cat]}  [{cat_mean:.1f}\\%, 95\\% CI: "
+                    f"{cat_ci_low:.1f}--{cat_ci_high:.1f}]"
+                )
+            else:
+                stat_str = flip_short[cat]
+
+            lines.append(
+                r"\textbf{" + _escape_latex(ds_name) + r"} "
+                + r"{\normalfont " + stat_str + r"} \\"
+            )
+            lines.append(r"\midrule")
+
+            for ex in examples:
+                claim = _escape_latex(ex["text"].strip())
+                ns_expl = " \\newline ".join(
+                    _escape_latex_with_links(seg)
+                    for seg in ex["no_search_explanation"].strip().split("\n")
+                    if seg.strip()
+                )
+                s_expl = " \\newline ".join(
+                    _escape_latex_with_links(seg)
+                    for seg in ex["search_explanation"].strip().split("\n")
+                    if seg.strip()
+                )
+
+                ns_label = "True" if ex["no_search_validity"] == 1 else "False"
+                s_label = "True" if ex["search_validity"] == 1 else "False"
+
+                lines.append(
+                    r"\textit{Claim:} " + claim + r" \\"
+                )
+                lines.append(
+                    r"\quad \textbf{No-search} (verdict: " + ns_label
+                    + r"): {\ttfamily\small " + ns_expl + r"} \\"
+                )
+                lines.append(
+                    r"\quad \textbf{Web-search} (verdict: " + s_label
+                    + r"): {\ttfamily\small " + s_expl + r"} \\"
+                )
+                lines.append(r"\hline\addlinespace")
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{longtable}",
+    ])
+
+    tex_path = output_dir / "appendix_flip_examples.tex"
+    with open(tex_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info("Saved appendix LaTeX table to %s", tex_path)
+
+
+# ---------------------------------------------------------------------------
+# Flip-category plot
+# ---------------------------------------------------------------------------
+
+
+def _plot_flip_categories(results: list[dict], output_dir: Path) -> None:
+    """Stacked horizontal bar chart: per dataset, bars show F->T and T->F
+    as the 'flip' components, with F->F and T->T as stable components.
+    """
+    plt.rcParams.update({"font.size": 18})
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    dataset_names = [r["dataset"] for r in results]
+    n_datasets = len(dataset_names)
+    x = np.arange(n_datasets)
+    width = 0.55
+
+    ff_vals = [r["ff_mean"] or 0 for r in results]
+    ft_vals = [r["ft_mean"] or 0 for r in results]
+    tf_vals = [r["tf_mean"] or 0 for r in results]
+    tt_vals = [r["tt_mean"] or 0 for r in results]
+
+    # Stack order (bottom to top): F->F, F->T, T->F, T->T
+    bottom_ft = ff_vals
+    bottom_tf = [a + b for a, b in zip(ff_vals, ft_vals)]
+    bottom_tt = [a + b + c for a, b, c in zip(ff_vals, ft_vals, tf_vals)]
+
+    colors = ["#999999", "#D55E00", "#009E73", "#2E75B6"]
+    labels = [r"F $\to$ F", r"F $\to$ T", r"T $\to$ F", r"T $\to$ T"]
+
+    ax.bar(x, ff_vals, width, label=labels[0], color=colors[0])
+    ax.bar(x, ft_vals, width, bottom=bottom_ft, label=labels[1], color=colors[1])
+    ax.bar(x, tf_vals, width, bottom=bottom_tf, label=labels[2], color=colors[2])
+    ax.bar(x, tt_vals, width, bottom=bottom_tt, label=labels[3], color=colors[3])
+
+    # Annotate segments
+    for i in range(n_datasets):
+        for vals, bottom, color in [
+            (ff_vals, [0] * n_datasets, "white"),
+            (ft_vals, bottom_ft, "white"),
+            (tf_vals, bottom_tf, "white"),
+            (tt_vals, bottom_tt, "white"),
+        ]:
+            if vals[i] > 6:
+                ax.text(
+                    x[i], bottom[i] + vals[i] / 2, f"{vals[i]:.1f}%",
+                    ha="center", va="center", fontsize=14, fontweight="bold",
+                    color=color,
+                )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(dataset_names)
+    ax.set_ylabel("Percentage of run-pairs (%)")
+    ax.set_ylim(0, 105)
+    ax.legend(loc="upper right", fontsize=14, framealpha=0.9)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+
+    png_path = output_dir / "flip_categories.png"
+    fig.savefig(png_path, dpi=150)
+    logger.info("Saved plot to %s", png_path)
+
+    pdf_path = output_dir / "flip_categories.pdf"
+    fig.savefig(pdf_path)
+    logger.info("Saved plot to %s", pdf_path)
+
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Table output
 # ---------------------------------------------------------------------------
+
+
+def _print_flip_table(results: list[dict]) -> pd.DataFrame:
+    """Build and print flip-category results DataFrame."""
+    rows = []
+    for r in results:
+        row = {
+            "dataset": r["dataset"],
+            "n": r["n_examples"],
+            "F->F_%": r["ff_mean"],
+            "F->F_CI": f"[{r['ff_ci_low']}, {r['ff_ci_high']}]" if r["ff_ci_low"] is not None else "-",
+            "F->T_%": r["ft_mean"],
+            "F->T_CI": f"[{r['ft_ci_low']}, {r['ft_ci_high']}]" if r["ft_ci_low"] is not None else "-",
+            "T->F_%": r["tf_mean"],
+            "T->F_CI": f"[{r['tf_ci_low']}, {r['tf_ci_high']}]" if r["tf_ci_low"] is not None else "-",
+            "T->T_%": r["tt_mean"],
+            "T->T_CI": f"[{r['tt_ci_low']}, {r['tt_ci_high']}]" if r["tt_ci_low"] is not None else "-",
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    print()
+    print("=" * 110)
+    print("Fact-Check Flip Categories — Verdict Transitions (No-Search -> Web-Search)")
+    print("=" * 110)
+    print(df.to_string(index=False))
+    print()
+
+    return df
 
 
 def _print_table(results: list[dict]) -> pd.DataFrame:
@@ -828,6 +1271,343 @@ def _print_table(results: list[dict]) -> pd.DataFrame:
     print()
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# Regenerate helper: compute class distribution from raw output files
+# ---------------------------------------------------------------------------
+
+
+def _dataset_to_raw_prefix(dataset_name: str, existing_prefixes: set[str]) -> str | None:
+    """Map a dataset display name to a raw-directory prefix."""
+    # Exact match first (raw dirs are named with the dataset key verbatim)
+    if dataset_name in existing_prefixes:
+        return dataset_name
+
+    # Fall back to sanitized matching for older or differently-named dirs
+    def _sanitize(name: str) -> str:
+        s = name.lower()
+        s = s.replace("\n", " ").replace("(", "").replace(")", "")
+        s = re.sub(r"\s+", "-", s).strip("-")
+        return s
+
+    sanitized = _sanitize(dataset_name)
+    sanitized_map = {_sanitize(p): p for p in existing_prefixes}
+
+    if sanitized in sanitized_map:
+        return sanitized_map[sanitized]
+
+    sanitized_u = sanitized.replace("-", "_")
+    if sanitized_u in sanitized_map:
+        return sanitized_map[sanitized_u]
+
+    # Partial match (against sanitized forms)
+    for s_prefix, original in sanitized_map.items():
+        if s_prefix in sanitized or sanitized in s_prefix:
+            return original
+
+    return None
+
+
+def _compute_flip_categories_from_raw(raw_dir: Path) -> list[dict]:
+    """Read raw per-run JSON files and compute flip-category rates.
+
+    For each dataset (matched *_search / *_nosearch dir pair), loads all
+    example files, pairs search and no-search runs by run_idx, and categorizes
+    each pair by the no-search -> web-search verdict transition:
+    F→F, F→T, T→F, T→T.
+
+    Returns list of per-dataset result dicts with per-example mean and
+    t-distribution 95% CI for each category.
+    """
+    datasets: dict[str, dict[str, Path]] = {}
+    for d in sorted(raw_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if name.endswith("_search"):
+            prefix = name.removesuffix("_search")
+            datasets.setdefault(prefix, {})["search"] = d
+        elif name.endswith("_nosearch"):
+            prefix = name.removesuffix("_nosearch")
+            datasets.setdefault(prefix, {})["nosearch"] = d
+
+    # Order: Chai-Veracity first, then alphabetical
+    def _sort_key(prefix: str) -> tuple[int, str]:
+        p = prefix.replace("\n", " ").lower()
+        if "chai" in p:
+            return (0, p)
+        return (1, p)
+
+    results: list[dict] = []
+    n_runs = 0
+
+    for prefix in sorted(datasets.keys(), key=_sort_key):
+        dirs = datasets[prefix]
+        if "search" not in dirs or "nosearch" not in dirs:
+            logger.warning("  Skipping %s: missing search or nosearch dir", prefix)
+            continue
+
+        search_dir = dirs["search"]
+        nosearch_dir = dirs["nosearch"]
+
+        # Load search data keyed by example_idx
+        search_data: dict[int, dict] = {}
+        for fpath in sorted(search_dir.glob("search_ex*.json")):
+            with open(fpath) as f:
+                data = json.load(f)
+            search_data[data["example_idx"]] = data
+
+        # Load nosearch data keyed by example_idx
+        nosearch_data: dict[int, dict] = {}
+        for fpath in sorted(nosearch_dir.glob("nosearch_ex*.json")):
+            with open(fpath) as f:
+                data = json.load(f)
+            nosearch_data[data["example_idx"]] = data
+
+        # Per-example category rates
+        per_ex_ff: list[float] = []
+        per_ex_ft: list[float] = []
+        per_ex_tf: list[float] = []
+        per_ex_tt: list[float] = []
+
+        common_indices = sorted(set(search_data.keys()) & set(nosearch_data.keys()))
+        for ex_idx in common_indices:
+            s_runs = {
+                r["run"]: r["validity"]
+                for r in search_data[ex_idx]["runs"]
+                if r["validity"] is not None
+            }
+            n_runs_dict = {
+                r["run"]: r["validity"]
+                for r in nosearch_data[ex_idx]["runs"]
+                if r["validity"] is not None
+            }
+
+            common_runs = set(s_runs.keys()) & set(n_runs_dict.keys())
+            if not common_runs:
+                continue
+
+            ff = ft = tf = tt = 0
+            for run in common_runs:
+                ns = n_runs_dict[run]  # 0=False, 1=True
+                s = s_runs[run]       # 0=False, 1=True
+                if ns == 0 and s == 0:
+                    ff += 1
+                elif ns == 0 and s == 1:
+                    ft += 1
+                elif ns == 1 and s == 0:
+                    tf += 1
+                else:
+                    tt += 1
+
+            total = ff + ft + tf + tt
+            per_ex_ff.append(ff / total * 100)
+            per_ex_ft.append(ft / total * 100)
+            per_ex_tf.append(tf / total * 100)
+            per_ex_tt.append(tt / total * 100)
+
+        n_runs = max(n_runs, max(len(s_runs), len(n_runs_dict)) if common_indices else 0)
+
+        def _stats(vals):
+            return _mean_ci(vals)
+
+        ff_m, _, _, ff_l, ff_h = _stats(per_ex_ff)
+        ft_m, _, _, ft_l, ft_h = _stats(per_ex_ft)
+        tf_m, _, _, tf_l, tf_h = _stats(per_ex_tf)
+        tt_m, _, _, tt_l, tt_h = _stats(per_ex_tt)
+
+        def _r(v):
+            return round(v, 2) if not math.isnan(v) else None
+
+        # Clean dataset name for display
+        display = prefix.replace("\n", " ").strip()
+
+        if len(per_ex_ff) == 0:
+            logger.warning("  Skipping %s: no examples with valid run-pairs", display)
+            continue
+
+        results.append({
+            "dataset": display,
+            "n_examples": len(per_ex_ff),
+            "n_runs": n_runs,
+            "ff_mean": _r(ff_m),  "ff_ci_low": _r(ff_l),  "ff_ci_high": _r(ff_h),
+            "ft_mean": _r(ft_m),  "ft_ci_low": _r(ft_l),  "ft_ci_high": _r(ft_h),
+            "tf_mean": _r(tf_m),  "tf_ci_low": _r(tf_l),  "tf_ci_high": _r(tf_h),
+            "tt_mean": _r(tt_m),  "tt_ci_low": _r(tt_l),  "tt_ci_high": _r(tt_h),
+        })
+
+        logger.info(
+            "  %s: F→F %.1f%%, F→T %.1f%%, T→F %.1f%%, T→T %.1f%%",
+            display, ff_m, ft_m, tf_m, tt_m,
+        )
+
+    return results
+
+
+def _collect_flip_examples(raw_dir: Path) -> dict[str, dict[str, list[dict]]]:
+    """Collect example claims and explanations for each flip category.
+
+    Returns dict mapping dataset_name -> {category -> [examples]}
+    where category is one of 'ff', 'ft', 'tf', 'tt' and each example is:
+        {'text': str, 'run': int, 'no_search_validity': int,
+         'no_search_explanation': str, 'search_validity': int,
+         'search_explanation': str}
+    """
+    MAX_PER_CATEGORY = 5
+
+    datasets: dict[str, dict[str, Path]] = {}
+    for d in sorted(raw_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if name.endswith("_search"):
+            prefix = name.removesuffix("_search")
+            datasets.setdefault(prefix, {})["search"] = d
+        elif name.endswith("_nosearch"):
+            prefix = name.removesuffix("_nosearch")
+            datasets.setdefault(prefix, {})["nosearch"] = d
+
+    def _sort_key(prefix: str) -> tuple[int, str]:
+        p = prefix.replace("\n", " ").lower()
+        if "chai" in p:
+            return (0, p)
+        return (1, p)
+
+    all_examples: dict[str, dict[str, list[dict]]] = {}
+
+    for prefix in sorted(datasets.keys(), key=_sort_key):
+        dirs = datasets[prefix]
+        if "search" not in dirs or "nosearch" not in dirs:
+            continue
+
+        search_dir = dirs["search"]
+        nosearch_dir = dirs["nosearch"]
+
+        search_data: dict[int, dict] = {}
+        for fpath in sorted(search_dir.glob("search_ex*.json")):
+            with open(fpath) as f:
+                data = json.load(f)
+            search_data[data["example_idx"]] = data
+
+        nosearch_data: dict[int, dict] = {}
+        for fpath in sorted(nosearch_dir.glob("nosearch_ex*.json")):
+            with open(fpath) as f:
+                data = json.load(f)
+            nosearch_data[data["example_idx"]] = data
+
+        display = prefix.replace("\n", " ").strip()
+        all_examples[display] = {"ff": [], "ft": [], "tf": [], "tt": []}
+
+        common_indices = sorted(set(search_data.keys()) & set(nosearch_data.keys()))
+        seen: dict[str, set[int]] = {"ff": set(), "ft": set(), "tf": set(), "tt": set()}
+
+        for ex_idx in common_indices:
+            s_runs = {
+                r["run"]: (r["validity"], r.get("explanation", ""))
+                for r in search_data[ex_idx]["runs"]
+                if r["validity"] is not None
+            }
+            n_runs = {
+                r["run"]: (r["validity"], r.get("explanation", ""))
+                for r in nosearch_data[ex_idx]["runs"]
+                if r["validity"] is not None
+            }
+
+            common_runs = set(s_runs.keys()) & set(n_runs.keys())
+            if not common_runs:
+                continue
+
+            text = search_data[ex_idx].get("text", "")
+
+            for run in sorted(common_runs):
+                ns_v, ns_expl = n_runs[run]
+                s_v, s_expl = s_runs[run]
+
+                if ns_v == 0 and s_v == 0:
+                    cat = "ff"
+                elif ns_v == 0 and s_v == 1:
+                    cat = "ft"
+                elif ns_v == 1 and s_v == 0:
+                    cat = "tf"
+                else:
+                    cat = "tt"
+
+                if ex_idx in seen[cat]:
+                    continue
+
+                cat_list = all_examples[display][cat]
+                if len(cat_list) < MAX_PER_CATEGORY:
+                    seen[cat].add(ex_idx)
+                    cat_list.append({
+                        "text": text,
+                        "run": run,
+                        "no_search_validity": ns_v,
+                        "no_search_explanation": ns_expl,
+                        "search_validity": s_v,
+                        "search_explanation": s_expl,
+                    })
+
+        logger.info(
+            "  %s: collected ff=%d ft=%d tf=%d tt=%d",
+            display,
+            len(all_examples[display]["ff"]),
+            len(all_examples[display]["ft"]),
+            len(all_examples[display]["tf"]),
+            len(all_examples[display]["tt"]),
+        )
+
+    return all_examples
+
+
+def _compute_class_dist_from_raw(results: list[dict], raw_dir: Path) -> None:
+    """Populate class-distribution fields in *results* from raw per-run JSON files."""
+    # Discover available raw-directory prefixes
+    existing: dict[str, dict[str, Path]] = {}
+    for d in raw_dir.iterdir():
+        if not d.is_dir():
+            continue
+        name = d.name
+        if name.endswith("_search"):
+            existing.setdefault(name.removesuffix("_search"), {})["search"] = d
+        elif name.endswith("_nosearch"):
+            existing.setdefault(name.removesuffix("_nosearch"), {})["nosearch"] = d
+
+    existing_prefixes = set(existing.keys())
+
+    for r in results:
+        prefix = _dataset_to_raw_prefix(r["dataset"], existing_prefixes)
+        if prefix is None or prefix not in existing:
+            logger.warning("  No raw dir match for dataset '%s'", r["dataset"])
+            continue
+
+        dirs = existing[prefix]
+        for agent_type, dir_key in [("search", "search"), ("no_search", "nosearch")]:
+            agent_dir = dirs.get(dir_key)
+            if agent_dir is None:
+                continue
+            true_rates: list[float] = []
+            for fpath in sorted(agent_dir.glob("*ex*.json")):
+                with open(fpath) as fh:
+                    data = json.load(fh)
+                valid = [d for d in data["runs"] if d["validity"] is not None]
+                if valid:
+                    n_true = sum(1 for d in valid if d["validity"] == 1)
+                    true_rates.append(n_true / len(valid) * 100)
+
+            mean, _, _, ci_low, ci_high = _mean_ci(true_rates)
+
+            def _r2(v):
+                return round(v, 2) if not math.isnan(v) else None
+
+            if agent_type == "search":
+                r["search_true_rate_mean"] = _r2(mean)
+                r["search_true_rate_ci_low"] = _r2(ci_low)
+                r["search_true_rate_ci_high"] = _r2(ci_high)
+            else:
+                r["no_search_true_rate_mean"] = _r2(mean)
+                r["no_search_true_rate_ci_low"] = _r2(ci_low)
+                r["no_search_true_rate_ci_high"] = _r2(ci_high)
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +1660,7 @@ async def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=1,
         help="Random seed for subsampling",
     )
     parser.add_argument(
@@ -896,16 +1676,26 @@ async def main():
     args = parser.parse_args()
 
     if args.regenerate:
-        json_path = Path(args.output_dir) / "results.json"
-        if not json_path.exists():
-            raise FileNotFoundError(f"results.json not found at {json_path}")
-        with open(json_path) as f:
-            results = json.load(f)
-        n_runs = results[0]["n_runs"] if results else args.n_runs
         output_dir = Path(args.output_dir)
-        _plot(results, n_runs, output_dir)
-        _plot_search_calls(results, n_runs, output_dir)
-        print(f"Regenerated plots in {output_dir}/")
+        raw_dir = output_dir / "raw"
+        if not raw_dir.exists():
+            raise FileNotFoundError(f"raw directory not found at {raw_dir}")
+        results = _compute_flip_categories_from_raw(raw_dir)
+
+        _print_flip_table(results)
+
+        json_path = output_dir / "results.json"
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2, default=str)
+        logger.info("Saved JSON to %s", json_path)
+
+        _write_latex_flip_table(results, output_dir)
+        _plot_flip_categories(results, output_dir)
+
+        flip_examples = _collect_flip_examples(raw_dir)
+        _write_appendix_flip_table(flip_examples, results, output_dir)
+
+        print(f"Regenerated flip-category analysis in {output_dir}/")
         return
 
     model_name = args.model_name or os.environ["MODEL_NAME"]
@@ -1022,7 +1812,8 @@ async def main():
 
     # Plot
     _plot(all_results, args.n_runs, output_dir)
-    _plot_search_calls(all_results, output_dir)
+    _plot_search_calls(all_results, args.n_runs, output_dir)
+    _plot_class_distribution(all_results, args.n_runs, output_dir)
 
     print(f"\nOutput saved to {output_dir}/")
 
