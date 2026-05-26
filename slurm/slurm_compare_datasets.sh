@@ -4,7 +4,7 @@
 #SBATCH --error=logs/compare_datasets_%j.err
 
 #SBATCH -c 8
-#SBATCH --gres=gpu:ampere:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --mem=48GB
 #SBATCH -t 3:00:00
 
@@ -81,7 +81,7 @@ BG_PIDS=()
 
 uv run scripts/analysis/compare_dataset_quality.py \
     --model-name $MODEL_NAME \
-    --n-samples 100 \
+    --n-samples 50 \
     --n-judge-runs 5 \
     --max-concurrency 128 \
     --output-dir outputs/compare_dataset_quality &

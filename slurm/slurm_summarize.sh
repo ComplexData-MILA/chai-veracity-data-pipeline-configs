@@ -12,6 +12,7 @@ set -e
 
 export PROJECT_HOME=$HOME/20260331-chai-veracity
 export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-9B}"
+export MASTER_PORT=0
 
 mkdir -pv /tmp/$USER/torchinductor
 export TORCHINDUCTOR_CACHE_DIR=/tmp/$USER/torchinductor

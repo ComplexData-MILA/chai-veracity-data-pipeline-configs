@@ -28,6 +28,14 @@ class Claim(BaseModel):
     is_specific: bool
     post_indices: list[int]
 
+    def attribute_dict(self) -> dict[str, Any]:
+        """Return the subset of fields that describe claim attributes (flags + entities)."""
+        return {
+            k: v
+            for k, v in self.model_dump().items()
+            if k.startswith("is_") or k in ["public_entities"]
+        }
+
 
 class ClusterSummary(BaseModel):
     claims: list[Claim]
@@ -163,11 +171,7 @@ async def _get_topic_iterator(
                 "post_count": len(claim_texts),
                 "original_texts": claim_texts,
                 "date": date_str,
-                **{
-                    k: v
-                    for k, v in claim.model_dump()
-                    if k.startswith("is_") or k in ["public_entities"]
-                },
+                **claim.attribute_dict(),
             }
             for col in copy_columns:
                 col_data = item.data.get(col, [])
@@ -204,7 +208,7 @@ async def main():
     parser.add_argument("--dataset-name", default="posts_summarized_002_dry_run")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--max-texts-per-cluster", type=int, default=32)
-    parser.add_argument("--max-claims-per-cluster", type=int, default=3)
+    parser.add_argument("--max-claims-per-cluster", type=int, default=10)
     parser.add_argument(
         "--batch",
         default=None,

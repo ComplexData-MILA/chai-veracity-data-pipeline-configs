@@ -138,14 +138,34 @@ sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=central
 
 # Diverse
 sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS=diverse_sample_ids,DATASET_NAME=posts_summarized_004_a_dry_run_diverse,BATCH=bsky-trending-20260503 slurm/slurm_summarize.sh
+```
 
 Full runs (all batches, drop BATCH and the _dry_run suffix):
 
+```bash
 # Central
-sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=central_sample_texts,COPY_COLUMNS=central_sample_ids,DATASET_NAME=posts_summarized_004_central slurm/slurm_summarize.sh
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=central_sample_texts,COPY_COLUMNS="central_sample_ids",DATASET_NAME=posts_summarized_002_a_central slurm/slurm_summarize.sh
 
 # Diverse
-sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS=diverse_sample_ids,DATASET_NAME=posts_summarized_004_diverse slurm/slurm_summarize.sh
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_002,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS="diverse_sample_ids",DATASET_NAME=posts_summarized_002_a_diverse slurm/slurm_summarize.sh
+
+# Central
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_004,TEXT_COLUMN=central_sample_texts,COPY_COLUMNS="central_sample_ids,central_sample_at_uris",DATASET_NAME=posts_summarized_004_b_central slurm/slurm_summarize.sh
+
+# Diverse
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_004,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS="diverse_sample_ids,diverse_sample_at_uris",DATASET_NAME=posts_summarized_004_b_diverse slurm/slurm_summarize.sh
+
+# Central
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_kmeans_001,TEXT_COLUMN=central_sample_texts,COPY_COLUMNS="central_sample_ids",DATASET_NAME=posts_summarized_007_central_kmeans slurm/slurm_summarize.sh
+
+# Diverse
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_kmeans_001,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS="diverse_sample_ids",DATASET_NAME=posts_summarized_007_diverse_kmeans slurm/slurm_summarize.sh
+
+# Diverse
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_005_c,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS="diverse_sample_ids,diverse_sample_at_uris",DATASET_NAME=posts_summarized_dbscan_diverse_005_c slurm/slurm_summarize.sh
+
+# Central
+sbatch --export=ALL,INPUT_DATASET=posts_clustered_dbscan_005_c,TEXT_COLUMN=diverse_sample_texts,COPY_COLUMNS="central_sample_ids,central_sample_at_uris",DATASET_NAME=posts_summarized_dbscan_central_005_c slurm/slurm_summarize.sh
 ```
 
 **Via external API** (OpenAI-compatible endpoint):
