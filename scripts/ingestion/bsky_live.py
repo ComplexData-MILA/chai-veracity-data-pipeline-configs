@@ -258,7 +258,7 @@ async def main() -> None:
                     iter_until_timeout(stream, timeout=3600),
                     name=args.dataset_name,
                     batch=batch_name,
-                    streaming_configs=S3DataTool.StreamingConfigs(chunk_size=100),
+                    streaming_configs=S3DataTool.StreamingConfigs(chunk_size=10000),
                     deduplicate_on=["text"],  # list of columns
                 )
 

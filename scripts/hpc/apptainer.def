@@ -1,0 +1,34 @@
+Bootstrap: docker
+From: python:3.13-slim
+
+%files
+    /tmp/hpc-requirements.txt /opt/requirements.txt
+    # clustering_offline.py is bind-mounted at runtime so it can be updated
+    # without rebuilding the SIF. The bind mount is handled in run_slurm.sh.
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        libopenblas0 \
+        libgomp1 \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir -r /opt/requirements.txt
+
+%environment
+    export PYTHONPATH=/opt/scripts
+    export PATH=/usr/local/bin:$PATH
+    # Threading: let SLURM/OpenMP auto-detect available cores.
+    # Unset restrictive single-thread defaults inherited from base image.
+
+%runscript
+    if [ ! -f /opt/scripts/clustering_offline.py ]; then
+        echo "ERROR: clustering_offline.py not found in container." >&2
+        echo "This script is bind-mounted at runtime by run_slurm.sh." >&2
+        echo "Use: apptainer exec --bind /path/to/clustering_offline.py:/opt/scripts/clustering_offline.py ..." >&2
+        exit 1
+    fi
+    exec python /opt/scripts/clustering_offline.py "$@"
+
+%labels
+    Author Jacob-Junqi
+    Version 1.0
