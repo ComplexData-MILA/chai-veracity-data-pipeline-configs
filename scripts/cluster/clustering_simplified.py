@@ -126,6 +126,35 @@ def _simhash_dedup_mask(
     return list(bucket_best.values())
 
 
+def _deduplicate_clusters(
+    clusters: list[list[DataItem]],
+    embeddings_matrix: np.ndarray,
+    orig_idx_map: dict[str, int],
+    min_cluster_size: int,
+) -> list[list[DataItem]]:
+    """De-duplicate each cluster via simhash LSH, then drop clusters that fall below *min_cluster_size*."""
+    result = []
+    n_dropped = 0
+    for cluster in clusters:
+        indices = [orig_idx_map[row.id] for row in cluster]
+        cluster_embs = embeddings_matrix[indices]
+        centroid = cluster_embs.mean(axis=0)
+        texts = [row.data.get("text", "") for row in cluster]
+        kept = _simhash_dedup_mask(texts, centroid, cluster_embs)
+        deduped = [cluster[i] for i in kept]
+        if len(deduped) >= min_cluster_size:
+            result.append(deduped)
+        else:
+            n_dropped += 1
+
+    if n_dropped:
+        logger.info(
+            "Dropped %d clusters after de-duplication (below min_cluster_size=%d).",
+            n_dropped, min_cluster_size,
+        )
+    return result
+
+
 # ---------------------------------------------------------------------------
 #  Sampling strategies
 # ---------------------------------------------------------------------------
@@ -382,13 +411,13 @@ async def _process_day(
     day: str,
     day_batches: list[str],
     dataset_name: str,
-    eps: float = 0.7,
+    eps: float = 0.75,
     min_samples: int = 5,
     min_cluster_size: int = 50,
     M: int = 32,
     ef_construction: int = 200,
     ef_search: int = 300,
-    sample_size: int = 50,
+    sample_size: int = 30,
     collect_limit: int = 0,
     output_batch_name: str | None = None,
     skip_upload: bool = False,
@@ -417,9 +446,20 @@ async def _process_day(
         logger.warning("Day %s: no clusters formed (all points discarded as noise).", day)
         return []
 
-    # Compute centroids as cluster means and build index map for sampling.
+    # Build index map for cluster post-processing.
     embeddings_matrix = np.stack(collected.embeddings).astype(np.float32)
     orig_idx_map = {row.id: i for i, row in enumerate(collected.rows)}
+
+    # De-duplicate clusters and re-filter by min_cluster_size.
+    clusters = _deduplicate_clusters(
+        clusters, embeddings_matrix, orig_idx_map, min_cluster_size,
+    )
+
+    if not clusters:
+        logger.warning("Day %s: no clusters remain after de-duplication.", day)
+        return []
+
+    # Compute centroids as cluster means.
     centroids = []
     for cluster in clusters:
         indices = [orig_idx_map[row.id] for row in cluster]
@@ -466,13 +506,13 @@ async def main() -> list[list]:
     )
     parser.add_argument("--limit", type=int, default=1, help="Max days to process (default: 1, 0=all)")
     parser.add_argument("--dataset-name", default="posts_clustered_dbscan_001")
-    parser.add_argument("--eps", type=float, default=0.9, help="Inner-product threshold (cosine similarity) for DBSCAN (default: 0.9)")
-    parser.add_argument("--min-samples", type=int, default=100, help="Minimum neighbours for core points (default: 100)")
+    parser.add_argument("--eps", type=float, default=0.75, help="Inner-product threshold (cosine similarity) for DBSCAN (default: 0.75)")
+    parser.add_argument("--min-samples", type=int, default=5, help="Minimum neighbours for core points (default: 5)")
     parser.add_argument("--min-cluster-size", type=int, default=50, help="Drop clusters with fewer items than this (default: 50)")
     parser.add_argument("--M", type=int, default=32, help="HNSW out-degree (default: 32)")
     parser.add_argument("--ef-construction", type=int, default=200, help="HNSW build-time search width (default: 200)")
     parser.add_argument("--ef-search", type=int, default=300, help="HNSW query-time search width (default: 300)")
-    parser.add_argument("--sample-size", type=int, default=50, help="Max elements per sample per cluster (default: 50)")
+    parser.add_argument("--sample-size", type=int, default=30, help="Max elements per sample per cluster (default: 30)")
     parser.add_argument("--collect-limit", type=int, default=0, help="Cap rows collected from S3, 0=no limit (dry-run)")
     parser.add_argument("--batch", default=None, help="Process only this specific batch name (overrides --limit).")
     parser.add_argument("--day", default=None, help="Process only batches for this day (YYYYMMDD). Overrides --limit.")

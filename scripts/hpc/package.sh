@@ -32,6 +32,7 @@ cp "${SCRIPT_DIR}/clustering_offline.sif" "${WORKDIR}/"
 # Copy scripts
 echo "Copying runner scripts..."
 cp "${SCRIPT_DIR}/run_slurm.sh" "${WORKDIR}/"
+cp "${SCRIPT_DIR}/clustering_offline.py" "${WORKDIR}/"
 cp "${SCRIPT_DIR}/upload_results.sh" "${WORKDIR}/"
 cp "${SCRIPT_DIR}/upload_single_day.py" "${WORKDIR}/"
 

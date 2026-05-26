@@ -31,6 +31,13 @@ SLURM_MEM="${SLURM_MEM:-72GB}"
 SLURM_CPUS="${SLURM_CPUS:-18}"
 SLURM_ACCOUNT="${SLURM_ACCOUNT:-ctb-liyue}"
 
+PY_SCRIPT="${TARBALL_DIR}/clustering_offline.py"
+
+# Ensure apptainer is available on login node for day discovery
+if ! command -v apptainer &>/dev/null; then
+    module load apptainer/1.4.5 2>/dev/null || true
+fi
+
 mkdir -p "$OUTPUT_BASE" "$LOG_DIR"
 
 # ---- discover days -----------------------------------------------------------
@@ -38,6 +45,7 @@ echo "=== Discovering days from local data ==="
 DAYS=$(
     apptainer exec --no-home \
         --bind "${DATA_DIR}:/data:ro" \
+        --bind "${PY_SCRIPT}:/opt/scripts/clustering_offline.py" \
         "$IMAGE" \
         python -c "
 from clustering_offline import list_batches, group_batches_by_day
@@ -74,6 +82,7 @@ TARBALL_DIR="TARBALL_DIR_PLACEHOLDER"
 DATA_DIR="${TARBALL_DIR}/data"
 OUTPUT_BASE="${TARBALL_DIR}/output"
 IMAGE="${TARBALL_DIR}/clustering_offline.sif"
+PY_SCRIPT="${TARBALL_DIR}/clustering_offline.py"
 DATASET_NAME="DATASET_NAME_PLACEHOLDER"
 SAMPLE_SIZE="SAMPLE_SIZE_PLACEHOLDER"
 MIN_CLUSTER_SIZE="MIN_CLUSTER_SIZE_PLACEHOLDER"
@@ -97,9 +106,11 @@ echo "============================================================"
 
 module load apptainer/1.4.5
 
+set +e
 apptainer exec --no-home \
     --bind "${DATA_DIR}:/data:ro" \
     --bind "${OUTPUT_DIR}:/output" \
+    --bind "${PY_SCRIPT}:/opt/scripts/clustering_offline.py" \
     "${IMAGE}" \
     python /opt/scripts/clustering_offline.py \
         --data-dir /data \
@@ -110,8 +121,8 @@ apptainer exec --no-home \
         --min-cluster-size "${MIN_CLUSTER_SIZE}" \
         --eps "${EPS}" \
         --min-samples "${MIN_SAMPLES}"
-
 RC=$?
+set -e
 if [ $RC -eq 0 ]; then
     echo "OK: Day ${DAY} completed successfully."
     touch "${OUTPUT_DIR}/_SUCCESS"

@@ -95,6 +95,10 @@ def _collect_local(
         logger.warning("No base parquet files found for batches.")
         return [], []
 
+    if not annot_paths:
+        logger.warning("No annotation (embedding) files found — no embeddings to cluster.")
+        return [], []
+
     base_paths_str = ", ".join(f"'{p}'" for p in base_paths)
     annot_paths_str = ", ".join(f"'{p}'" for p in annot_paths)
 
@@ -185,6 +189,34 @@ def _simhash_dedup_mask(
             bucket_best[lsh_key] = i
 
     return list(bucket_best.values())
+
+
+def _deduplicate_clusters(
+    clusters: list[list[dict]],
+    embeddings_matrix: np.ndarray,
+    min_cluster_size: int,
+) -> list[list[dict]]:
+    """De-duplicate each cluster via simhash LSH, then drop clusters that fall below *min_cluster_size*."""
+    result = []
+    n_dropped = 0
+    for cluster in clusters:
+        indices = [row["_emb_idx"] for row in cluster]
+        cluster_embs = embeddings_matrix[indices]
+        centroid = cluster_embs.mean(axis=0)
+        texts = [row.get("text", "") for row in cluster]
+        kept = _simhash_dedup_mask(texts, centroid, cluster_embs)
+        deduped = [cluster[i] for i in kept]
+        if len(deduped) >= min_cluster_size:
+            result.append(deduped)
+        else:
+            n_dropped += 1
+
+    if n_dropped:
+        logger.info(
+            "Dropped %d clusters after de-duplication (below min_cluster_size=%d).",
+            n_dropped, min_cluster_size,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +397,27 @@ def cluster_dbscan(
 
 
 # ---------------------------------------------------------------------------
+#  s3-data-tool compatible JSONL serialization
+# ---------------------------------------------------------------------------
+
+def _transform_row_for_jsonl(row: dict) -> dict:
+    """Mirrors s3_data_tool.s3_utils.transform_row_for_jsonl.
+
+    Serializes all dict/list/str values to compact JSON strings so that
+    downstream readers (filter_for_export / deserialize_json_fields) can
+    round-trip them correctly.
+    """
+    transformed = {}
+    for key, value in row.items():
+        if isinstance(value, (dict, list, str)):
+            transformed[key] = json.dumps(value, separators=(",", ":"))
+        else:
+            transformed[key] = value
+    transformed["id"] = row["id"]
+    return transformed
+
+
+# ---------------------------------------------------------------------------
 #  Local JSONL writer (replaces S3DataTool.dataset_generator)
 # ---------------------------------------------------------------------------
 
@@ -379,6 +432,8 @@ def _write_clusters_jsonl(
     """Write clusters as Newline-Delimited JSON to output_dir.
 
     Uses _emb_idx stored in each row dict to look up embeddings.
+    Serialization matches s3_data_tool.transform_row_for_jsonl so that
+    the output is compatible with the existing read path.
     Returns total rows written.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -404,7 +459,7 @@ def _write_clusters_jsonl(
         central_idx = _sample_central(texts, cluster_embs, centroid, sample_size)
         diverse_idx = _sample_diverse(cluster_embs, centroid, sample_size)
 
-        record = {
+        record = _transform_row_for_jsonl({
             "id": uuid.uuid4().hex[:16],
             "_batch": batch_name,
             "cluster_size": n,
@@ -414,7 +469,7 @@ def _write_clusters_jsonl(
             "diverse_sample_texts": [cluster[i].get("text", "") for i in diverse_idx],
             "diverse_sample_ids": [cluster[i].get("id", "") for i in diverse_idx],
             "diverse_sample_at_uris": [cluster[i].get("at_uri", "") for i in diverse_idx],
-        }
+        })
 
         fh.write(json.dumps(record) + "\n")
         row_count += 1
@@ -427,7 +482,6 @@ def _write_clusters_jsonl(
             row_count = 0
 
     fh.close()
-    # Remove trailing empty chunk if present
     last_chunk = output_dir / f"{batch_name}_{run_id}_chunk_{chunk_idx:04d}.jsonl"
     if last_chunk.exists() and last_chunk.stat().st_size == 0:
         last_chunk.unlink()
@@ -480,6 +534,15 @@ async def process_day(
         return 0
 
     embeddings_matrix = np.stack(embeddings).astype(np.float32)
+
+    # De-duplicate clusters and re-filter by min_cluster_size.
+    clusters = _deduplicate_clusters(clusters, embeddings_matrix, min_cluster_size)
+
+    if not clusters:
+        logger.warning("Day %s: no clusters remain after de-duplication.", day)
+        return 0
+
+    # Compute centroids as cluster means.
     centroids = []
     for cluster in clusters:
         indices = [row["_emb_idx"] for row in cluster]
@@ -512,8 +575,8 @@ async def main() -> None:
     parser.add_argument("--data-dir", required=True, help="Local data root directory")
     parser.add_argument("--output-dir", required=True, help="Local output directory for JSONL")
     parser.add_argument("--dataset-name", default="posts_clustered_dbscan_005_b")
-    parser.add_argument("--eps", type=float, default=0.9)
-    parser.add_argument("--min-samples", type=int, default=100)
+    parser.add_argument("--eps", type=float, default=0.7)
+    parser.add_argument("--min-samples", type=int, default=5)
     parser.add_argument("--min-cluster-size", type=int, default=50)
     parser.add_argument("--M", type=int, default=32)
     parser.add_argument("--ef-construction", type=int, default=200)

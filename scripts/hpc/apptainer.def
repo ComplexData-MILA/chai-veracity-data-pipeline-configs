@@ -3,8 +3,8 @@ From: python:3.13-slim
 
 %files
     /tmp/hpc-requirements.txt /opt/requirements.txt
-    # Offline clustering script
-    /mnt/chai-veracity-data-pipeline-configs/scripts/hpc/clustering_offline.py /opt/scripts/clustering_offline.py
+    # clustering_offline.py is bind-mounted at runtime so it can be updated
+    # without rebuilding the SIF. The bind mount is handled in run_slurm.sh.
 
 %post
     apt-get update && apt-get install -y --no-install-recommends \
@@ -21,6 +21,12 @@ From: python:3.13-slim
     # Unset restrictive single-thread defaults inherited from base image.
 
 %runscript
+    if [ ! -f /opt/scripts/clustering_offline.py ]; then
+        echo "ERROR: clustering_offline.py not found in container." >&2
+        echo "This script is bind-mounted at runtime by run_slurm.sh." >&2
+        echo "Use: apptainer exec --bind /path/to/clustering_offline.py:/opt/scripts/clustering_offline.py ..." >&2
+        exit 1
+    fi
     exec python /opt/scripts/clustering_offline.py "$@"
 
 %labels
